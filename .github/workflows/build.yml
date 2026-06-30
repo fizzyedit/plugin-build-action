@@ -66,7 +66,16 @@ jobs:
           version: ${{ inputs.zig-version }}
 
       - name: Build (ReleaseFast, native)
-        run: zig build -Doptimize=ReleaseFast
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Workaround for Zig 0.16.0 zip-fetch bug (ziglang/zig#31964 / #35264):
+          # the .zip unpack path creates its temp file under <global-cache>/tmp
+          # without first ensuring that directory exists, so a cold CI cache fails
+          # with "failed to create temporary zip file: FileNotFound". Pre-create it.
+          # (velopack_zig pulls velopack's prebuilt C-ABI archives as a .zip dep.)
+          mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
+          zig build -Doptimize=ReleaseFast
 
       - name: Stage binary + sha256 fragment
         shell: bash
