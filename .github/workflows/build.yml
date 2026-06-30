@@ -1,0 +1,148 @@
+name: Build Fizzy plugin
+
+# Reusable workflow: build a Fizzy plugin for every target, hash each binary, assemble the
+# author manifest, and publish all of them as Release assets. Runs in the *caller's* repo
+# context (so `actions/checkout` pulls the plugin source).
+on:
+  workflow_call:
+    inputs:
+      id:
+        description: "Plugin id (must equal manifest id and the registry/<id>.json stem)."
+        required: true
+        type: string
+      version:
+        description: "Plugin release version, no leading v (e.g. 0.1.0)."
+        required: true
+        type: string
+      fizzy-sdk-version:
+        description: "Fizzy SDK version this build targets (e.g. 0.7.0)."
+        required: true
+        type: string
+      abi-fingerprint:
+        description: "Host ABI fingerprint hex (e.g. 0x1bb54eb7506cbd78) — must match the SDK."
+        required: true
+        type: string
+      min-sdk-version:
+        description: "Minimum Fizzy SDK version required to load (defaults to fizzy-sdk-version)."
+        required: false
+        type: string
+        default: ""
+      zig-version:
+        description: "Zig toolchain version."
+        required: false
+        type: string
+        default: "0.16.0"
+      artifact-path:
+        description: "Built dylib path relative to repo root, sans extension (default zig-out/<id>)."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.os_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_arch: macos-aarch64
+            runner: macos-14
+            ext: dylib
+          - os_arch: linux-x86_64
+            runner: ubuntu-latest
+            ext: so
+          - os_arch: windows-x86_64
+            runner: windows-latest
+            ext: dll
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ inputs.zig-version }}
+
+      - name: Build (ReleaseFast, native)
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Stage binary + sha256 fragment
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ inputs.artifact-path }}"
+          [ -n "$base" ] || base="zig-out/${{ inputs.id }}"
+          src="${base}.${{ matrix.ext }}"
+          asset="${{ inputs.id }}-${{ matrix.os_arch }}.${{ matrix.ext }}"
+          test -f "$src" || { echo "::error::built artifact not found at $src"; exit 1; }
+
+          mkdir -p out frag
+          cp "$src" "out/${asset}"
+
+          # sha256, portable across runners.
+          if command -v sha256sum >/dev/null; then
+            sum=$(sha256sum "$src" | awk '{print $1}')
+          else
+            sum=$(shasum -a 256 "$src" | awk '{print $1}')
+          fi
+
+          url="https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/${asset}"
+          printf '{"os_arch":"%s","url":"%s","sha256":"%s"}\n' \
+            "${{ matrix.os_arch }}" "$url" "$sum" > "frag/${{ matrix.os_arch }}.json"
+          cat "frag/${{ matrix.os_arch }}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os_arch }}
+          path: out/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frag-${{ matrix.os_arch }}
+          path: frag/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # A reusable workflow runs in the caller's context, so this action repo's own scripts/
+      # aren't on disk — check them out explicitly. Pin to a tag in production.
+      - uses: actions/checkout@v4
+        with:
+          repository: fizzyedit/plugin-build-action
+          path: .plugin-build-action
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: frag-*
+          path: frags
+          merge-multiple: true
+
+      - name: Assemble manifest.json
+        run: |
+          python3 .plugin-build-action/scripts/assemble_manifest.py \
+            --id "${{ inputs.id }}" \
+            --version "${{ inputs.version }}" \
+            --abi-fingerprint "${{ inputs.abi-fingerprint }}" \
+            --fizzy-sdk-version "${{ inputs.fizzy-sdk-version }}" \
+            --min-sdk-version "${{ inputs.min-sdk-version || inputs.fizzy-sdk-version }}" \
+            --merge-url "https://github.com/${{ github.repository }}/releases/latest/download/manifest.json" \
+            --frags frags \
+            --out dist/manifest.json
+          echo "----- manifest.json -----"; cat dist/manifest.json
+
+      - name: Publish release (binaries + manifest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          files: |
+            dist/*.dylib
+            dist/*.so
+            dist/*.dll
+            dist/manifest.json
