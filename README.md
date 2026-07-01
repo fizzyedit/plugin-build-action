@@ -27,9 +27,9 @@ tag v0.1.0  ──►  build.yml  ──►  per-target dylib + sha256
 For a tag like `v0.1.0`, the release gets:
 
 ```
-<id>-macos-aarch64.dylib
-<id>-linux-x86_64.so
-<id>-windows-x86_64.dll
+<id>-macos-aarch64.dylib     <id>-macos-x86_64.dylib
+<id>-linux-x86_64.so         <id>-linux-aarch64.so
+<id>-windows-x86_64.dll      <id>-windows-aarch64.dll
 manifest.json            ← references the binaries above (url + sha256), accumulating older releases
 ```
 
@@ -52,7 +52,9 @@ manifest.json            ← references the binaries above (url + sha256), accum
    `root.zig` + `sdk.dylib.exportEntry`. If your build installs elsewhere, set `artifact-path`.
 
 3. **Add the release workflow.** Copy [`examples/release.yml`](examples/release.yml) to your
-   plugin repo as `.github/workflows/release.yml` and fill in the inputs:
+   plugin repo as `.github/workflows/release.yml` and fill in the inputs. The **version is the
+   pushed tag** (`vX.Y.Z` → `X.Y.Z`) — you never edit a version string here, so it can't drift
+   from the tag:
 
    ```yaml
    name: Release
@@ -60,13 +62,21 @@ manifest.json            ← references the binaries above (url + sha256), accum
      push:
        tags: ["v*"]
    jobs:
+     version:                      # tag → version (v0.1.2 → 0.1.2); single source of truth
+       runs-on: ubuntu-latest
+       outputs:
+         version: ${{ steps.v.outputs.version }}
+       steps:
+         - id: v
+           run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
      build:
+       needs: version
        uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v1
        permissions:
          contents: write          # create the release + upload assets
        with:
          id: pixi                  # must equal your manifest id and the registry/<id>.json stem
-         version: "0.1.0"          # plugin release version, no leading v
+         version: ${{ needs.version.outputs.version }}  # from the tag — do not hardcode
          fizzy-sdk-version: "0.7.0"
          abi-fingerprint: "0x1bb54eb7506cbd78"
          min-sdk-version: "0.7.0"
@@ -103,7 +113,7 @@ plugin into the index. Subsequent releases need no registry PR — just tag agai
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `id` | yes | — | Plugin id; must equal the manifest id and the `registry/<id>.json` stem. |
-| `version` | yes | — | Release version, no leading `v` (e.g. `0.1.0`). The tag is `v<version>`. |
+| `version` | yes | — | Release version, no leading `v` (e.g. `0.1.0`). The tag is `v<version>`. The `examples/release.yml` caller derives this from the pushed tag, so don't hardcode it. |
 | `fizzy-sdk-version` | yes | — | Fizzy SDK version this build targets (e.g. `0.7.0`). |
 | `abi-fingerprint` | yes | — | Host ABI fingerprint hex; must match the SDK (e.g. `0x1bb54eb7506cbd78`). |
 | `min-sdk-version` | no | = `fizzy-sdk-version` | Minimum SDK version required to load. |
@@ -117,8 +127,10 @@ instead of seeing *"needs a rebuild."*
 
 ## How it works
 
-- **Native build per target** (`macos-14` → macos-aarch64, `ubuntu-latest` → linux-x86_64,
-  `windows-latest` → windows-x86_64), so SDL/dvui/cmark link cleanly — no cross-compilation.
+- **One build per target across all 6 host arches**, cross-compiled with `-Dtarget=` from three
+  runners (`macos-14` → macos-{aarch64,x86_64}, `ubuntu-latest` → linux-{x86_64,aarch64},
+  `windows-latest` → windows-{x86_64,aarch64}). Plugins are pure Zig + vendored C, so the
+  non-native arches cross-compile cleanly — no scarce arm64 runners needed.
 - Each job emits a `{ os_arch, url, sha256 }` fragment; the `publish` job runs
   [`scripts/assemble_manifest.py`](scripts/assemble_manifest.py), which fetches the previous
   `releases/latest/.../manifest.json` and merges the new release in (replacing any entry with the
