@@ -92,7 +92,7 @@ jobs:
         with:
           version: ${{ inputs.zig-version }}
 
-      - name: Build (ReleaseSafe, ${{ matrix.zig_target }})
+      - name: Build (ReleaseFast, ${{ matrix.zig_target }})
         shell: bash
         run: |
           set -euo pipefail
@@ -104,13 +104,13 @@ jobs:
           # bumped past it, plugin builds no longer fetch velopack's .zip dep and this
           # can be removed. Keep it until then.
           mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
-          # ReleaseSafe (not ReleaseFast) on purpose: the host's `abi_fingerprint` folds in
-          # optimize mode, and {Debug, ReleaseSafe} share one layout class while
-          # {ReleaseFast, ReleaseSmall} share the other. Shipping ReleaseSafe lets both a
-          # ReleaseSafe *and* a Debug host load the plugin — including a developer's
-          # `zig build run` (Debug) editor, which a ReleaseFast plugin would reject with
-          # AbiMismatch. Keep this in sync with the `abi-fingerprint` the caller passes.
-          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }}
+          # ReleaseFast to match the SHIPPED host: fizzy's release CI packages with
+          # `-Doptimize=ReleaseFast` (fizzy .github/workflows/release.yml), and the host's
+          # `abi_fingerprint` folds in optimize mode. A plugin must be built in the same mode
+          # as the host that loads it or the loader rejects it with AbiMismatch. (A developer's
+          # `zig build run` Debug editor is a different layout class and won't load these — for
+          # local dev, run a ReleaseFast editor or build the plugin with `zig build install`.)
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
 
       - name: Stage binary + sha256 fragment
         shell: bash
@@ -160,8 +160,9 @@ jobs:
           exp = int(expected, 16)
           if actual != exp:
               print(f"::error::{path} exports abi_fingerprint 0x{actual:016x}, but the "
-                    f"abi-fingerprint input is {expected} (0x{exp:016x}). The build is "
-                    f"ReleaseSafe — update the caller's abi-fingerprint to the ReleaseSafe value.")
+                    f"abi-fingerprint input is {expected} (0x{exp:016x}). This build is "
+                    f"ReleaseFast — set the caller's abi-fingerprint to the host's ReleaseFast "
+                    f"abi_fingerprint (the value shipped fizzy computes).")
               sys.exit(1)
           print(f"OK: abi_fingerprint 0x{actual:016x} matches the abi-fingerprint input")
           PY
