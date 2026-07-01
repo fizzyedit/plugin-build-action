@@ -47,15 +47,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # A Fizzy plugin is a native dylib/.so/.dll, so every host target Fizzy supports needs
+        # its own build. Plugins are pure Zig + vendored C (stbi/msf_gif/zip compile from source),
+        # so the non-native arches cross-compile from the same runners via `-Dtarget=` — no
+        # scarce arm64 runners required. `os_arch` flows into the asset name + manifest.json and
+        # MUST match what the host loader expects for each target; do not rename these.
         include:
           - os_arch: macos-aarch64
             runner: macos-14
+            zig_target: aarch64-macos
+            ext: dylib
+          - os_arch: macos-x86_64
+            runner: macos-14
+            zig_target: x86_64-macos
             ext: dylib
           - os_arch: linux-x86_64
             runner: ubuntu-latest
+            zig_target: x86_64-linux-gnu
+            ext: so
+          - os_arch: linux-aarch64
+            runner: ubuntu-latest
+            zig_target: aarch64-linux-gnu
             ext: so
           - os_arch: windows-x86_64
             runner: windows-latest
+            zig_target: x86_64-windows
+            ext: dll
+          - os_arch: windows-aarch64
+            runner: windows-latest
+            zig_target: aarch64-windows
             ext: dll
     runs-on: ${{ matrix.runner }}
     steps:
@@ -65,7 +85,7 @@ jobs:
         with:
           version: ${{ inputs.zig-version }}
 
-      - name: Build (ReleaseFast, native)
+      - name: Build (ReleaseFast, ${{ matrix.zig_target }})
         shell: bash
         run: |
           set -euo pipefail
@@ -73,9 +93,11 @@ jobs:
           # the .zip unpack path creates its temp file under <global-cache>/tmp
           # without first ensuring that directory exists, so a cold CI cache fails
           # with "failed to create temporary zip file: FileNotFound". Pre-create it.
-          # (velopack_zig pulls velopack's prebuilt C-ABI archives as a .zip dep.)
+          # NOTE: once the fizzy velopack-split lands and the plugin's fizzy pin is
+          # bumped past it, plugin builds no longer fetch velopack's .zip dep and this
+          # can be removed. Keep it until then.
           mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
-          zig build -Doptimize=ReleaseFast
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
 
       - name: Stage binary + sha256 fragment
         shell: bash
