@@ -52,11 +52,16 @@ jobs:
         # so the non-native arches cross-compile from the same runners via `-Dtarget=` — no
         # scarce arm64 runners required. `os_arch` flows into the asset name + manifest.json and
         # MUST match what the host loader expects for each target; do not rename these.
+        # `native: true` marks the targets whose dylib can actually be *loaded* on their runner
+        # (target arch == runner arch), so the fingerprint-verify step can dlopen the built binary
+        # and read its exported `fizzy_plugin_abi_fingerprint`. Cross-compiled targets can't be
+        # loaded on the runner, so they skip that check.
         include:
           - os_arch: macos-aarch64
             runner: macos-14
             zig_target: aarch64-macos
             ext: dylib
+            native: true
           - os_arch: macos-x86_64
             runner: macos-14
             zig_target: x86_64-macos
@@ -65,6 +70,7 @@ jobs:
             runner: ubuntu-latest
             zig_target: x86_64-linux-gnu
             ext: so
+            native: true
           - os_arch: linux-aarch64
             runner: ubuntu-latest
             zig_target: aarch64-linux-gnu
@@ -73,6 +79,7 @@ jobs:
             runner: windows-latest
             zig_target: x86_64-windows
             ext: dll
+            native: true
           - os_arch: windows-aarch64
             runner: windows-latest
             zig_target: aarch64-windows
@@ -85,7 +92,7 @@ jobs:
         with:
           version: ${{ inputs.zig-version }}
 
-      - name: Build (ReleaseFast, ${{ matrix.zig_target }})
+      - name: Build (ReleaseSafe, ${{ matrix.zig_target }})
         shell: bash
         run: |
           set -euo pipefail
@@ -97,7 +104,13 @@ jobs:
           # bumped past it, plugin builds no longer fetch velopack's .zip dep and this
           # can be removed. Keep it until then.
           mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
-          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
+          # ReleaseSafe (not ReleaseFast) on purpose: the host's `abi_fingerprint` folds in
+          # optimize mode, and {Debug, ReleaseSafe} share one layout class while
+          # {ReleaseFast, ReleaseSmall} share the other. Shipping ReleaseSafe lets both a
+          # ReleaseSafe *and* a Debug host load the plugin — including a developer's
+          # `zig build run` (Debug) editor, which a ReleaseFast plugin would reject with
+          # AbiMismatch. Keep this in sync with the `abi-fingerprint` the caller passes.
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }}
 
       - name: Stage binary + sha256 fragment
         shell: bash
@@ -123,6 +136,35 @@ jobs:
           printf '{"os_arch":"%s","url":"%s","sha256":"%s"}\n' \
             "${{ matrix.os_arch }}" "$url" "$sum" > "frag/${{ matrix.os_arch }}.json"
           cat "frag/${{ matrix.os_arch }}.json"
+
+      # Guard against the fingerprint/mode footgun: the manifest records `abi-fingerprint`
+      # (passed by the caller) as the hard load key, but the actual value depends on the build
+      # mode. dlopen the just-built binary, read its exported `fizzy_plugin_abi_fingerprint`,
+      # and fail loudly if it disagrees with what will be published. Only the native targets
+      # (target arch == runner arch) can be loaded on the runner; cross builds skip this.
+      - name: Verify ABI fingerprint matches input
+        if: ${{ matrix.native }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          asset="out/${{ inputs.id }}-${{ matrix.os_arch }}.${{ matrix.ext }}"
+          "$py" - "$asset" "${{ inputs.abi-fingerprint }}" <<'PY'
+          import ctypes, sys
+          path, expected = sys.argv[1], sys.argv[2]
+          loader = ctypes.WinDLL if sys.platform.startswith("win") else ctypes.CDLL
+          lib = loader(path)
+          fn = lib.fizzy_plugin_abi_fingerprint
+          fn.restype = ctypes.c_uint64
+          actual = fn()
+          exp = int(expected, 16)
+          if actual != exp:
+              print(f"::error::{path} exports abi_fingerprint 0x{actual:016x}, but the "
+                    f"abi-fingerprint input is {expected} (0x{exp:016x}). The build is "
+                    f"ReleaseSafe — update the caller's abi-fingerprint to the ReleaseSafe value.")
+              sys.exit(1)
+          print(f"OK: abi_fingerprint 0x{actual:016x} matches the abi-fingerprint input")
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
