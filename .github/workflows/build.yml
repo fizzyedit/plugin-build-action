@@ -15,11 +15,11 @@ on:
         required: true
         type: string
       fizzy-sdk-version:
-        description: "Fizzy SDK version this build targets (e.g. 0.7.0)."
+        description: "Fizzy SDK version this build targets (e.g. 0.9.0) — your pinned commit's sdk_version."
         required: true
         type: string
       abi-fingerprint:
-        description: "Host ABI fingerprint hex (e.g. 0x1bb54eb7506cbd78) — must match the SDK."
+        description: "Host runtime ABI fingerprint hex, ReleaseFast (e.g. 0x17428bfc3819460c) — must match your pinned commit."
         required: true
         type: string
       min-sdk-version:
@@ -40,6 +40,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zig-global-cache
 
 jobs:
   build:
@@ -88,28 +91,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Pre-create Zig cache tmp/
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+          mkdir -p "${ZIG_LOCAL_CACHE_DIR:-$GITHUB_WORKSPACE/.zig-cache}/tmp"
+
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ inputs.zig-version }}
+
+      # Zig 0.16's HTTP client doesn't retry on `HttpConnectionClosing` from GitHub.
+      # Pre-fetch deps in a retry loop (separate from the build) so flaky Windows CI
+      # fetches don't fail the whole matrix job. See fizzy .github/workflows/ci.yml.
+      - name: Fetch dependencies (with retries)
+        shell: bash
+        run: |
+          set -euo pipefail
+          fetch() {
+            local args="$1"
+            local n=0
+            until [ "$n" -ge 5 ]; do
+              zig build --fetch $args && return 0
+              n=$((n+1))
+              echo "Fetch attempt $n ($args) failed, sleeping $((n*10))s before retry..."
+              sleep $((n*10))
+            done
+            return 1
+          }
+          fetch "" || exit 1
+          fetch "-Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}" || exit 1
 
       - name: Build (ReleaseFast, ${{ matrix.zig_target }})
         shell: bash
         run: |
           set -euo pipefail
-          # Workaround for Zig 0.16.0 zip-fetch bug (ziglang/zig#31964 / #35264):
-          # the .zip unpack path creates its temp file under <global-cache>/tmp
-          # without first ensuring that directory exists, so a cold CI cache fails
-          # with "failed to create temporary zip file: FileNotFound". Pre-create it.
-          # NOTE: once the fizzy velopack-split lands and the plugin's fizzy pin is
-          # bumped past it, plugin builds no longer fetch velopack's .zip dep and this
-          # can be removed. Keep it until then.
-          mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
-          # ReleaseFast to match the SHIPPED host: fizzy's release CI packages with
-          # `-Doptimize=ReleaseFast` (fizzy .github/workflows/release.yml), and the host's
-          # `abi_fingerprint` folds in optimize mode. A plugin must be built in the same mode
-          # as the host that loads it or the loader rejects it with AbiMismatch. (A developer's
-          # `zig build run` Debug editor is a different layout class and won't load these — for
-          # local dev, run a ReleaseFast editor or build the plugin with `zig build install`.)
           zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
 
       - name: Stage binary + sha256 fragment
@@ -185,6 +202,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: fizzyedit/plugin-build-action
+          ref: v2
           path: .plugin-build-action
 
       - uses: actions/download-artifact@v4

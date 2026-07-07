@@ -8,9 +8,10 @@ publishes both as **GitHub Release assets**.
 
 A Fizzy plugin is a native dylib valid for exactly one `(abi_fingerprint, os-arch)` pair, so a
 release ships one binary per target plus a manifest the in-app store reads — indirectly, via the
-[`fizzyedit/plugins`](https://github.com/fizzyedit/plugins) aggregator, which merges every
-author's manifest into `https://plugins.fizzyed.it/index.json`. This action automates that matrix
-so you don't hand-build, hand-hash, and hand-write the manifest each release.
+[`fizzyedit/plugins`](https://github.com/fizzyedit/plugins) aggregator, which folds every
+author's manifest into a static catalog served at `https://plugins.fizzyed.it/catalog/`. This
+action automates the build matrix so you don't hand-build, hand-hash, and hand-write the
+manifest each release.
 
 ```
 tag v0.1.0  ──►  build.yml  ──►  per-target dylib + sha256
@@ -19,7 +20,8 @@ tag v0.1.0  ──►  build.yml  ──►  per-target dylib + sha256
             release assets: pixi-macos-aarch64.dylib, …, manifest.json
                      │
                      ▼  registry/<id>.json points manifest_url at releases/latest
-            fizzyedit/plugins aggregator  ──►  index.json  ──►  Fizzy store
+            fizzyedit/plugins aggregator  ──►  catalog/ (summary.json + per-fingerprint
+                                                 releases.json)  ──►  Fizzy store
 ```
 
 ## What it produces
@@ -45,8 +47,12 @@ manifest.json            ← references the binaries above (url + sha256), accum
    },
    ```
 
-   Pick the commit whose `src/sdk/version.zig` has the `sdk_version` / `recorded_abi_fingerprint`
-   you're building against (run `zig fetch --save=fizzy <url>` to fill in the hash).
+   Pick the commit whose `src/sdk/version.zig` has the `sdk_version` you're building against (run
+   `zig fetch --save=fizzy <url>` to fill in the hash). `abi-fingerprint` below is that commit's
+   **runtime** `dylib.abi_fingerprint` in `ReleaseFast` mode — not the CI-lock
+   `recorded_sdk_shape_fingerprint` in the same file. See fizzy's
+   [`docs/PLUGINS.md`](https://github.com/fizzyedit/fizzy/blob/main/docs/PLUGINS.md) §5 for the
+   distinction.
 
 2. **Make `zig build` install the plugin dylib to `zig-out/<id>.<ext>`** — the canonical layout via
    `root.zig` + `sdk.dylib.exportEntry`. If your build installs elsewhere, set `artifact-path`.
@@ -71,15 +77,15 @@ manifest.json            ← references the binaries above (url + sha256), accum
            run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
      build:
        needs: version
-       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v1
+       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v2
        permissions:
          contents: write          # create the release + upload assets
        with:
          id: pixi                  # must equal your manifest id and the registry/<id>.json stem
          version: ${{ needs.version.outputs.version }}  # from the tag — do not hardcode
-         fizzy-sdk-version: "0.7.0"
-         abi-fingerprint: "0x1bb54eb7506cbd78"
-         min-sdk-version: "0.7.0"
+         fizzy-sdk-version: "0.9.0"       # example — use YOUR pinned fizzy commit's sdk_version
+         abi-fingerprint: "0x17428bfc3819460c"  # and its runtime ReleaseFast abi_fingerprint
+         min-sdk-version: "0.9.0"
          zig-version: "0.16.0"
    ```
 
@@ -106,7 +112,20 @@ git tag v0.1.0 && git push origin v0.1.0
 
 The workflow builds all targets, publishes the release with the binaries + `manifest.json`, and
 the next `fizzyedit/plugins` aggregation (on merge, its 6-hourly cron, or a manual run) pulls your
-plugin into the index. Subsequent releases need no registry PR — just tag again.
+plugin into the catalog. Subsequent releases need no registry PR — just tag again.
+
+## Changelog
+
+### v2
+
+- Pre-fetch Zig package dependencies with retries before building, working around Zig 0.16
+  `HttpConnectionClosing` flakes when fetching GitHub deps (especially on Windows CI).
+- Use a workspace-local `ZIG_GLOBAL_CACHE_DIR` and pre-create cache `tmp/` (fixes cold-cache
+  zip-fetch `FileNotFound` on CI).
+
+### v1
+
+Initial release.
 
 ## Inputs
 
@@ -114,8 +133,8 @@ plugin into the index. Subsequent releases need no registry PR — just tag agai
 |-------|----------|---------|-------------|
 | `id` | yes | — | Plugin id; must equal the manifest id and the `registry/<id>.json` stem. |
 | `version` | yes | — | Release version, no leading `v` (e.g. `0.1.0`). The tag is `v<version>`. The `examples/release.yml` caller derives this from the pushed tag, so don't hardcode it. |
-| `fizzy-sdk-version` | yes | — | Fizzy SDK version this build targets (e.g. `0.7.0`). |
-| `abi-fingerprint` | yes | — | Host ABI fingerprint hex; must match the SDK (e.g. `0x1bb54eb7506cbd78`). |
+| `fizzy-sdk-version` | yes | — | Fizzy SDK version this build targets (e.g. `0.9.0` — your pinned commit's `sdk_version`). |
+| `abi-fingerprint` | yes | — | Host ABI fingerprint hex; must match your pinned commit's runtime `ReleaseFast` fingerprint (e.g. `0x17428bfc3819460c`). |
 | `min-sdk-version` | no | = `fizzy-sdk-version` | Minimum SDK version required to load. |
 | `zig-version` | no | `0.16.0` | Zig toolchain version. |
 | `artifact-path` | no | `zig-out/<id>` | Built dylib path (relative to repo root) **without** extension. |

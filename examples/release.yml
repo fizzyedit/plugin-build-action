@@ -12,8 +12,15 @@
 #         .hash = "<zig-package-hash>",
 #     },
 #
-# Bump `fizzy-sdk-version` / `abi-fingerprint` below only when you rebuild against a new SDK
-# (read them from fizzy's src/sdk/version.zig: sdk_version + recorded_abi_fingerprint).
+# Bump `fizzy-sdk-version` / `abi-fingerprint` below only when you rebuild against a new SDK.
+# `fizzy-sdk-version` is `sdk_version` in fizzy's src/sdk/version.zig. `abi-fingerprint` is that
+# same commit's RUNTIME `dylib.abi_fingerprint` in ReleaseFast mode (fizzy's release CI packages
+# -Doptimize=ReleaseFast) — NOT `recorded_sdk_shape_fingerprint`, which is a different,
+# mode/target-invariant CI-lock value. See fizzy's docs/PLUGINS.md §5 for the distinction. The
+# build workflow dlopens the built binary and fails if its exported fingerprint doesn't match
+# this value, so a wrong number is caught at CI time instead of shipping an unloadable plugin.
+#
+# The values below are illustrative — use YOUR pinned fizzy commit's own numbers.
 name: Release
 on:
   push:
@@ -33,13 +40,13 @@ jobs:
 
   build:
     needs: version
-    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v1
+    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v2
     permissions:
       contents: write
     with:
       id: pixi
       version: ${{ needs.version.outputs.version }}
-      fizzy-sdk-version: "0.7.0"
-      abi-fingerprint: "0x1bb54eb7506cbd78"
-      min-sdk-version: "0.7.0"
+      fizzy-sdk-version: "0.9.0"
+      abi-fingerprint: "0x17428bfc3819460c"
+      min-sdk-version: "0.9.0"
       zig-version: "0.16.0"
