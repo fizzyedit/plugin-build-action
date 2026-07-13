@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: ""
+      targets:
+        description: "Comma-separated os_arch subset to build (default: all 6). E.g. 'macos-aarch64,macos-x86_64,linux-x86_64,linux-aarch64'."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -45,48 +50,75 @@ env:
   ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zig-global-cache
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches the exact class of bug a plugin author bumping `build.zig.zon`'s version
+      # without also bumping it before tagging (or vice versa) produces: the tag drives the
+      # release/manifest version, `build.zig.zon` drives what the plugin itself reports, and
+      # nothing else here cross-checks them. Fails fast, before any of the 6 build legs run.
+      - name: Verify build.zig.zon version matches release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          zon_version=$(grep -v '^\s*//' build.zig.zon | grep -oE '\.version[[:space:]]*=[[:space:]]*"[^"]+"' | head -n1 | grep -oE '"[^"]+"' | tr -d '"')
+          if [ -z "$zon_version" ]; then
+            echo "::error::could not find .version in build.zig.zon"; exit 1
+          fi
+          if [ "$zon_version" != "${{ inputs.version }}" ]; then
+            echo "::error::build.zig.zon .version ($zon_version) does not match the release tag version (${{ inputs.version }}). Bump build.zig.zon before tagging a release."
+            exit 1
+          fi
+          echo "OK: build.zig.zon version $zon_version matches tag v${{ inputs.version }}"
+
+      # A Fizzy plugin is a native dylib/.so/.dll, so every host target Fizzy supports needs
+      # its own build by default. Plugins are pure Zig + vendored C (stbi/msf_gif/zip compile
+      # from source), so the non-native arches cross-compile from the same runners via
+      # `-Dtarget=` — no scarce arm64 runners required. `os_arch` flows into the asset name
+      # + manifest.json and MUST match what the host loader expects for each target; do not
+      # rename these. `native: true` marks the targets whose dylib can actually be *loaded*
+      # on their runner (target arch == runner arch), so the fingerprint-verify step can
+      # dlopen the built binary and read its exported `fizzy_plugin_abi_fingerprint`.
+      # Cross-compiled targets can't be loaded on the runner, so they skip that check.
+      # `targets` (optional) filters this list down to a subset, e.g. for a plugin that only
+      # supports macOS/Linux so far — `scripts/assemble_manifest.py` already tolerates a
+      # manifest built from a partial set of platform fragments.
+      - name: Compute build matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          all='[
+            {"os_arch":"macos-aarch64","runner":"macos-14","zig_target":"aarch64-macos","ext":"dylib","native":true},
+            {"os_arch":"macos-x86_64","runner":"macos-14","zig_target":"x86_64-macos","ext":"dylib"},
+            {"os_arch":"linux-x86_64","runner":"ubuntu-latest","zig_target":"x86_64-linux-gnu","ext":"so","native":true},
+            {"os_arch":"linux-aarch64","runner":"ubuntu-latest","zig_target":"aarch64-linux-gnu","ext":"so"},
+            {"os_arch":"windows-x86_64","runner":"windows-latest","zig_target":"x86_64-windows","ext":"dll","native":true},
+            {"os_arch":"windows-aarch64","runner":"windows-latest","zig_target":"aarch64-windows","ext":"dll"}
+          ]'
+          targets="${{ inputs.targets }}"
+          if [ -z "$targets" ]; then
+            filtered="$all"
+          else
+            keep=$(printf '%s' "$targets" | jq -R -c 'split(",")')
+            filtered=$(printf '%s' "$all" | jq -c --argjson keep "$keep" '[.[] | select(.os_arch as $o | $keep | index($o) != null)]')
+          fi
+          if [ "$(printf '%s' "$filtered" | jq 'length')" = "0" ]; then
+            echo "::error::targets '$targets' matched none of the known os_arch values"; exit 1
+          fi
+          echo "matrix=$(printf '%s' "$filtered" | jq -c .)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: setup
     name: build ${{ matrix.os_arch }}
     strategy:
       fail-fast: false
       matrix:
-        # A Fizzy plugin is a native dylib/.so/.dll, so every host target Fizzy supports needs
-        # its own build. Plugins are pure Zig + vendored C (stbi/msf_gif/zip compile from source),
-        # so the non-native arches cross-compile from the same runners via `-Dtarget=` — no
-        # scarce arm64 runners required. `os_arch` flows into the asset name + manifest.json and
-        # MUST match what the host loader expects for each target; do not rename these.
-        # `native: true` marks the targets whose dylib can actually be *loaded* on their runner
-        # (target arch == runner arch), so the fingerprint-verify step can dlopen the built binary
-        # and read its exported `fizzy_plugin_abi_fingerprint`. Cross-compiled targets can't be
-        # loaded on the runner, so they skip that check.
-        include:
-          - os_arch: macos-aarch64
-            runner: macos-14
-            zig_target: aarch64-macos
-            ext: dylib
-            native: true
-          - os_arch: macos-x86_64
-            runner: macos-14
-            zig_target: x86_64-macos
-            ext: dylib
-          - os_arch: linux-x86_64
-            runner: ubuntu-latest
-            zig_target: x86_64-linux-gnu
-            ext: so
-            native: true
-          - os_arch: linux-aarch64
-            runner: ubuntu-latest
-            zig_target: aarch64-linux-gnu
-            ext: so
-          - os_arch: windows-x86_64
-            runner: windows-latest
-            zig_target: x86_64-windows
-            ext: dll
-            native: true
-          - os_arch: windows-aarch64
-            runner: windows-latest
-            zig_target: aarch64-windows
-            ext: dll
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
