@@ -56,17 +56,25 @@ jobs:
       - uses: actions/checkout@v4
 
       # Scripts live in this action repo; the reusable workflow runs in the caller's
-      # workspace, so fetch them at the same ref the caller pinned (`…/build.yml@vN`).
+      # workspace, so it needs a second explicit checkout of this repo for them.
+      #
+      # This can't be resolved dynamically: `github.workflow_ref` (and `$GITHUB_WORKFLOW_REF`)
+      # reflects the *caller's own* triggering workflow ref (e.g. a plugin repo's
+      # `release.yml@refs/tags/v0.2.9`), not the ref this reusable `build.yml` was itself
+      # pinned at via the caller's `uses: fizzyedit/plugin-build-action/.github/workflows/
+      # build.yml@vN` line — there is no GitHub Actions context variable that exposes that.
+      # A prior version of this step tried to extract it from `$GITHUB_WORKFLOW_REF` anyway,
+      # which silently fetched the *caller's* release tag instead of this repo's own — that
+      # tag never exists here, so every release failed at checkout.
+      #
+      # So: hardcode the major version this file's scripts are compatible with. Bump this
+      # literal by hand whenever a new major tag (v4, v5, …) changes the scripts' interface.
       - name: Resolve plugin-build-action ref
         id: action_ref
         shell: bash
         run: |
           set -euo pipefail
-          # github.workflow_ref looks like: owner/repo/.github/workflows/build.yml@v3
-          ref="${GITHUB_WORKFLOW_REF##*@}"
-          if [ -z "$ref" ] || [ "$ref" = "$GITHUB_WORKFLOW_REF" ]; then
-            ref="v3"
-          fi
+          ref="v3"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Using plugin-build-action@$ref for scripts"
 
