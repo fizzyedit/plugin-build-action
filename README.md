@@ -47,20 +47,21 @@ manifest.json            ← references the binaries above (url + sha256), accum
    },
    ```
 
-   Pick the commit whose `src/sdk/version.zig` has the `sdk_version` you're building against (run
-   `zig fetch --save=fizzy <url>` to fill in the hash). `abi-fingerprint` below is that commit's
-   **runtime** `dylib.abi_fingerprint` in `ReleaseFast` mode — not the CI-lock
-   `recorded_sdk_shape_fingerprint` in the same file. See fizzy's
+   That pin is the source of truth for `fizzy_sdk_version` and the ReleaseFast
+   `abi_fingerprint` — the action reads both from the built dylib. You never copy them into
+   workflow YAML. See fizzy's
    [`docs/PLUGINS.md`](https://github.com/fizzyedit/fizzy/blob/main/docs/PLUGINS.md) §5 for the
-   distinction.
+   fingerprint distinction.
 
-2. **Make `zig build` install the plugin dylib to `zig-out/<id>.<ext>`** — the canonical layout via
-   `root.zig` + `sdk.dylib.exportEntry`. If your build installs elsewhere, set `artifact-path`.
+2. **Add identity-only `plugin.zig.zon`** at the repo root (`id` / `name` / `version` /
+   `min_sdk_version`). The pushed tag (`vX.Y.Z`) **must equal** `.version`.
 
-3. **Add the release workflow.** Copy [`examples/release.yml`](examples/release.yml) to your
-   plugin repo as `.github/workflows/release.yml` and fill in the inputs. The **version is the
-   pushed tag** (`vX.Y.Z` → `X.Y.Z`) — you never edit a version string here, so it can't drift
-   from the tag:
+3. **Make `zig build` install the plugin dylib to `zig-out/<id>.<ext>`** — via
+   `fizzy.plugin.create` + `.install` (generated dylib root; no author `root.zig`). If your build
+   installs elsewhere, set `artifact-path`.
+
+4. **Add the release workflow.** Copy [`examples/release.yml`](examples/release.yml) to your
+   plugin repo as `.github/workflows/release.yml`:
 
    ```yaml
    name: Release
@@ -68,28 +69,15 @@ manifest.json            ← references the binaries above (url + sha256), accum
      push:
        tags: ["v*"]
    jobs:
-     version:                      # tag → version (v0.1.2 → 0.1.2); single source of truth
-       runs-on: ubuntu-latest
-       outputs:
-         version: ${{ steps.v.outputs.version }}
-       steps:
-         - id: v
-           run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
      build:
-       needs: version
-       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v2
+       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v3
        permissions:
-         contents: write          # create the release + upload assets
+         contents: write
        with:
-         id: pixi                  # must equal your manifest id and the registry/<id>.json stem
-         version: ${{ needs.version.outputs.version }}  # from the tag — do not hardcode
-         fizzy-sdk-version: "0.9.0"       # example — use YOUR pinned fizzy commit's sdk_version
-         abi-fingerprint: "0x17428bfc3819460c"  # and its runtime ReleaseFast abi_fingerprint
-         min-sdk-version: "0.9.0"
          zig-version: "0.16.0"
    ```
 
-4. **Register once in `fizzyedit/plugins`** — open a PR adding `registry/<id>.json` with
+5. **Register once in `fizzyedit/plugins`** — open a PR adding `registry/<id>.json` with
    `manifest_url` pointing at your latest release manifest:
 
    ```json
@@ -114,7 +102,23 @@ The workflow builds all targets, publishes the release with the binaries + `mani
 the next `fizzyedit/plugins` aggregation (on merge, its 6-hourly cron, or a manual run) pulls your
 plugin into the catalog. Subsequent releases need no registry PR — just tag again.
 
+Bump the fizzy pin in `build.zig.zon` when you want a new SDK; the next tag's manifest picks up
+the new `fizzy_sdk_version` / `abi_fingerprint` automatically. The manifest **accumulates**
+releases (keyed by `version` + `abi_fingerprint`), so users on older SDKs keep matching an older
+binary instead of seeing *"needs a rebuild."*
+
 ## Changelog
+
+### v3
+
+- Derive `fizzy_sdk_version` + `abi_fingerprint` from `zig-out/sdk-meta.json` (emitted by
+  `fizzy.plugin.install`) — removed as workflow inputs.
+- Cross-compile all 6 targets from `ubuntu-latest` (plugins are unsigned; no macOS/Windows
+  runners or code signing).
+- Read `id` / `version` / `min_sdk_version` from `plugin.zig.zon`; release version defaults to the
+  triggering `v*` tag (must match the zon).
+- Caller `release.yml` only needs `zig-version` (optional overrides for `id` / `version` /
+  `artifact-path` / `targets` remain).
 
 ### v2
 
@@ -131,34 +135,30 @@ Initial release.
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `id` | yes | — | Plugin id; must equal the manifest id and the `registry/<id>.json` stem. |
-| `version` | yes | — | Release version, no leading `v` (e.g. `0.1.0`). The tag is `v<version>`. The `examples/release.yml` caller derives this from the pushed tag, so don't hardcode it. |
-| `fizzy-sdk-version` | yes | — | Fizzy SDK version this build targets (e.g. `0.9.0` — your pinned commit's `sdk_version`). |
-| `abi-fingerprint` | yes | — | Host ABI fingerprint hex; must match your pinned commit's runtime `ReleaseFast` fingerprint (e.g. `0x17428bfc3819460c`). |
-| `min-sdk-version` | no | = `fizzy-sdk-version` | Minimum SDK version required to load. |
 | `zig-version` | no | `0.16.0` | Zig toolchain version. |
+| `id` | no | `plugin.zig.zon` `.id` | Override plugin id (must match the zon if set). |
+| `version` | no | tag without `v` | Override release version (must match `plugin.zig.zon` `.version`). |
 | `artifact-path` | no | `zig-out/<id>` | Built dylib path (relative to repo root) **without** extension. |
-
-Bump `fizzy-sdk-version` / `abi-fingerprint` only when you rebuild against a new Fizzy SDK — they
-change on a deliberate SDK bump, not every app release. The manifest **accumulates** releases
-(keyed by `version` + `abi_fingerprint`), so users on older SDKs keep matching an older binary
-instead of seeing *"needs a rebuild."*
+| `targets` | no | all 6 | Comma-separated `os_arch` subset to build. |
 
 ## How it works
 
-- **One build per target across all 6 host arches**, cross-compiled with `-Dtarget=` from three
-  runners (`macos-14` → macos-{aarch64,x86_64}, `ubuntu-latest` → linux-{x86_64,aarch64},
-  `windows-latest` → windows-{x86_64,aarch64}). Plugins are pure Zig + vendored C, so the
-  non-native arches cross-compile cleanly — no scarce arm64 runners needed.
-- Each job emits a `{ os_arch, url, sha256 }` fragment; the `publish` job runs
-  [`scripts/assemble_manifest.py`](scripts/assemble_manifest.py), which fetches the previous
-  `releases/latest/.../manifest.json` and merges the new release in (replacing any entry with the
-  same `version` + `abi_fingerprint`), then `softprops/action-gh-release` uploads everything.
+- **Setup** reads `plugin.zig.zon`, checks the tag/`version` input against `.version`, and builds
+  the target matrix.
+- **One build per target across all 6 host arches**, all cross-compiled with `-Dtarget=` from
+  `ubuntu-latest`. Plugins are unsigned pure Zig + vendored C (optional prebuilt `.a`/`.lib`
+  deps are selected per target), so there is no macOS/Windows runner or signing step.
+- Every target collects `zig-out/sdk-meta.json` (written by the fizzy pin at build time). Publish
+  requires all targets to agree on sdk/fingerprint, then
+  [`scripts/assemble_manifest.py`](scripts/assemble_manifest.py) merges the new release into the
+  prior `manifest.json`.
 
 ## Files
 
 | Path | Role |
 |------|------|
 | `.github/workflows/build.yml` | The reusable (`workflow_call`) build + publish workflow. |
-| `scripts/assemble_manifest.py` | Merges per-target sha256 fragments into `manifest.json` (stdlib only). |
+| `scripts/assemble_manifest.py` | Merges per-target sha256 fragments into `manifest.json`. |
+| `scripts/read_plugin_zon.py` | Parses identity from `plugin.zig.zon`. |
+| `scripts/read_plugin_exports.py` | Optional local helper: `dlopen` a *native* plugin and print exports. |
 | `examples/release.yml` | Drop-in caller for a plugin repo. |

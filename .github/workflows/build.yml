@@ -3,27 +3,21 @@ name: Build Fizzy plugin
 # Reusable workflow: build a Fizzy plugin for every target, hash each binary, assemble the
 # author manifest, and publish all of them as Release assets. Runs in the *caller's* repo
 # context (so `actions/checkout` pulls the plugin source).
+#
+# Identity (`id` / `version` / `min_sdk_version`) comes from the caller's `plugin.zig.zon`.
+# `fizzy_sdk_version` + `abi_fingerprint` come from `zig-out/sdk-meta.json` (emitted by
+# `fizzy.plugin.install`). All 6 targets cross-compile from ubuntu-latest — no macOS/Windows
+# runners, no signing, no dlopen. Do not hand-copy sdk/fingerprint into caller YAML.
 on:
   workflow_call:
     inputs:
       id:
-        description: "Plugin id (must equal manifest id and the registry/<id>.json stem)."
-        required: true
+        description: "Override plugin id (default: plugin.zig.zon .id)."
+        required: false
         type: string
+        default: ""
       version:
-        description: "Plugin release version, no leading v (e.g. 0.1.0)."
-        required: true
-        type: string
-      fizzy-sdk-version:
-        description: "Fizzy SDK version this build targets (e.g. 0.9.0) — your pinned commit's sdk_version."
-        required: true
-        type: string
-      abi-fingerprint:
-        description: "Host runtime ABI fingerprint hex, ReleaseFast (e.g. 0x17428bfc3819460c) — must match your pinned commit."
-        required: true
-        type: string
-      min-sdk-version:
-        description: "Minimum Fizzy SDK version required to load (defaults to fizzy-sdk-version)."
+        description: "Override release version, no leading v (default: tag without v, checked against plugin.zig.zon .version)."
         required: false
         type: string
         default: ""
@@ -54,51 +48,104 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      id: ${{ steps.meta.outputs.id }}
+      version: ${{ steps.meta.outputs.version }}
+      min_sdk_version: ${{ steps.meta.outputs.min_sdk_version }}
+      action_ref: ${{ steps.action_ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
 
-      # Catches the exact class of bug a plugin author bumping `build.zig.zon`'s version
-      # without also bumping it before tagging (or vice versa) produces: the tag drives the
-      # release/manifest version, `build.zig.zon` drives what the plugin itself reports, and
-      # nothing else here cross-checks them. Fails fast, before any of the 6 build legs run.
-      - name: Verify build.zig.zon version matches release tag
+      # Scripts live in this action repo; the reusable workflow runs in the caller's
+      # workspace, so fetch them at the same ref the caller pinned (`…/build.yml@vN`).
+      - name: Resolve plugin-build-action ref
+        id: action_ref
         shell: bash
         run: |
           set -euo pipefail
-          zon_version=$(grep -v '^\s*//' build.zig.zon | grep -oE '\.version[[:space:]]*=[[:space:]]*"[^"]+"' | head -n1 | grep -oE '"[^"]+"' | tr -d '"')
-          if [ -z "$zon_version" ]; then
-            echo "::error::could not find .version in build.zig.zon"; exit 1
+          # github.workflow_ref looks like: owner/repo/.github/workflows/build.yml@v3
+          ref="${GITHUB_WORKFLOW_REF##*@}"
+          if [ -z "$ref" ] || [ "$ref" = "$GITHUB_WORKFLOW_REF" ]; then
+            ref="v3"
           fi
-          if [ "$zon_version" != "${{ inputs.version }}" ]; then
-            echo "::error::build.zig.zon .version ($zon_version) does not match the release tag version (${{ inputs.version }}). Bump build.zig.zon before tagging a release."
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Using plugin-build-action@$ref for scripts"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: fizzyedit/plugin-build-action
+          ref: ${{ steps.action_ref.outputs.ref }}
+          path: .plugin-build-action
+
+      - name: Read plugin.zig.zon + resolve release version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          zon=$("$py" .plugin-build-action/scripts/read_plugin_zon.py plugin.zig.zon)
+          echo "$zon"
+
+          zon_id=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          zon_version=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+          zon_min=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["min_sdk_version"])')
+
+          id="${{ inputs.id }}"
+          [ -n "$id" ] || id="$zon_id"
+          if [ "$id" != "$zon_id" ]; then
+            echo "::error::inputs.id ($id) does not match plugin.zig.zon .id ($zon_id)"
             exit 1
           fi
-          echo "OK: build.zig.zon version $zon_version matches tag v${{ inputs.version }}"
 
-      # A Fizzy plugin is a native dylib/.so/.dll, so every host target Fizzy supports needs
-      # its own build by default. Plugins are pure Zig + vendored C (stbi/msf_gif/zip compile
-      # from source), so the non-native arches cross-compile from the same runners via
-      # `-Dtarget=` — no scarce arm64 runners required. `os_arch` flows into the asset name
-      # + manifest.json and MUST match what the host loader expects for each target; do not
-      # rename these. `native: true` marks the targets whose dylib can actually be *loaded*
-      # on their runner (target arch == runner arch), so the fingerprint-verify step can
-      # dlopen the built binary and read its exported `fizzy_plugin_abi_fingerprint`.
-      # Cross-compiled targets can't be loaded on the runner, so they skip that check.
-      # `targets` (optional) filters this list down to a subset, e.g. for a plugin that only
-      # supports macOS/Linux so far — `scripts/assemble_manifest.py` already tolerates a
-      # manifest built from a partial set of platform fragments.
+          # Prefer an explicit input, else the triggering tag (v0.1.2 → 0.1.2).
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            ref="${GITHUB_REF_NAME:-}"
+            case "$ref" in
+              v*) version="${ref#v}" ;;
+              *)
+                echo "::error::no version input and ref '$ref' is not a v* tag; pass inputs.version or tag vX.Y.Z"
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [ "$version" != "$zon_version" ]; then
+            echo "::error::release version ($version) does not match plugin.zig.zon .version ($zon_version). Bump plugin.zig.zon before tagging."
+            exit 1
+          fi
+
+          # build.zig.zon .version should stay aligned too (historical check).
+          if [ -f build.zig.zon ]; then
+            bz=$(grep -v '^\s*//' build.zig.zon | grep -oE '\.version[[:space:]]*=[[:space:]]*"[^"]+"' | head -n1 | grep -oE '"[^"]+"' | tr -d '"' || true)
+            if [ -n "$bz" ] && [ "$bz" != "$version" ]; then
+              echo "::error::build.zig.zon .version ($bz) does not match release version ($version)"
+              exit 1
+            fi
+          fi
+
+          {
+            echo "id=$id"
+            echo "version=$version"
+            echo "min_sdk_version=$zon_min"
+          } >> "$GITHUB_OUTPUT"
+          echo "OK: id=$id version=$version min_sdk_version=${zon_min:-"(default to pinned sdk)"}"
+
       - name: Compute build matrix
         id: matrix
         shell: bash
         run: |
           set -euo pipefail
+          # All targets cross-compile from ubuntu-latest. Plugins are unsigned pure Zig +
+          # vendored C (plus optional prebuilt .a/.lib deps like ghostty_vt), so there is no
+          # need for macOS/Windows runners or code signing. sdk-meta.json is emitted at build
+          # time — no dlopen on the runner required.
           all='[
-            {"os_arch":"macos-aarch64","runner":"macos-14","zig_target":"aarch64-macos","ext":"dylib","native":true},
-            {"os_arch":"macos-x86_64","runner":"macos-14","zig_target":"x86_64-macos","ext":"dylib"},
-            {"os_arch":"linux-x86_64","runner":"ubuntu-latest","zig_target":"x86_64-linux-gnu","ext":"so","native":true},
-            {"os_arch":"linux-aarch64","runner":"ubuntu-latest","zig_target":"aarch64-linux-gnu","ext":"so"},
-            {"os_arch":"windows-x86_64","runner":"windows-latest","zig_target":"x86_64-windows","ext":"dll","native":true},
-            {"os_arch":"windows-aarch64","runner":"windows-latest","zig_target":"aarch64-windows","ext":"dll"}
+            {"os_arch":"macos-aarch64","zig_target":"aarch64-macos","ext":"dylib"},
+            {"os_arch":"macos-x86_64","zig_target":"x86_64-macos","ext":"dylib"},
+            {"os_arch":"linux-x86_64","zig_target":"x86_64-linux-gnu","ext":"so"},
+            {"os_arch":"linux-aarch64","zig_target":"aarch64-linux-gnu","ext":"so"},
+            {"os_arch":"windows-x86_64","zig_target":"x86_64-windows","ext":"dll"},
+            {"os_arch":"windows-aarch64","zig_target":"aarch64-windows","ext":"dll"}
           ]'
           targets="${{ inputs.targets }}"
           if [ -z "$targets" ]; then
@@ -119,9 +166,15 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: fizzyedit/plugin-build-action
+          ref: ${{ needs.setup.outputs.action_ref }}
+          path: .plugin-build-action
 
       - name: Pre-create Zig cache tmp/
         shell: bash
@@ -165,56 +218,60 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          id="${{ needs.setup.outputs.id }}"
+          version="${{ needs.setup.outputs.version }}"
           base="${{ inputs.artifact-path }}"
-          [ -n "$base" ] || base="zig-out/${{ inputs.id }}"
+          [ -n "$base" ] || base="zig-out/${id}"
           src="${base}.${{ matrix.ext }}"
-          asset="${{ inputs.id }}-${{ matrix.os_arch }}.${{ matrix.ext }}"
+          asset="${id}-${{ matrix.os_arch }}.${{ matrix.ext }}"
           test -f "$src" || { echo "::error::built artifact not found at $src"; exit 1; }
 
           mkdir -p out frag
           cp "$src" "out/${asset}"
 
-          # sha256, portable across runners.
           if command -v sha256sum >/dev/null; then
             sum=$(sha256sum "$src" | awk '{print $1}')
           else
             sum=$(shasum -a 256 "$src" | awk '{print $1}')
           fi
 
-          url="https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/${asset}"
+          url="https://github.com/${{ github.repository }}/releases/download/v${version}/${asset}"
           printf '{"os_arch":"%s","url":"%s","sha256":"%s"}\n' \
             "${{ matrix.os_arch }}" "$url" "$sum" > "frag/${{ matrix.os_arch }}.json"
           cat "frag/${{ matrix.os_arch }}.json"
 
-      # Guard against the fingerprint/mode footgun: the manifest records `abi-fingerprint`
-      # (passed by the caller) as the hard load key, but the actual value depends on the build
-      # mode. dlopen the just-built binary, read its exported `fizzy_plugin_abi_fingerprint`,
-      # and fail loudly if it disagrees with what will be published. Only the native targets
-      # (target arch == runner arch) can be loaded on the runner; cross builds skip this.
-      - name: Verify ABI fingerprint matches input
-        if: ${{ matrix.native }}
+      # sdk-meta.json is emitted by fizzy.plugin.install at build time (same pin + optimize
+      # class as the dylib). Available for every cross target — no dlopen on the runner.
+      - name: Collect SDK metadata
         shell: bash
         run: |
           set -euo pipefail
           py=$(command -v python3 || command -v python)
-          asset="out/${{ inputs.id }}-${{ matrix.os_arch }}.${{ matrix.ext }}"
-          "$py" - "$asset" "${{ inputs.abi-fingerprint }}" <<'PY'
-          import ctypes, sys
-          path, expected = sys.argv[1], sys.argv[2]
-          loader = ctypes.WinDLL if sys.platform.startswith("win") else ctypes.CDLL
-          lib = loader(path)
-          fn = lib.fizzy_plugin_abi_fingerprint
-          fn.restype = ctypes.c_uint64
-          actual = fn()
-          exp = int(expected, 16)
-          if actual != exp:
-              print(f"::error::{path} exports abi_fingerprint 0x{actual:016x}, but the "
-                    f"abi-fingerprint input is {expected} (0x{exp:016x}). This build is "
-                    f"ReleaseFast — set the caller's abi-fingerprint to the host's ReleaseFast "
-                    f"abi_fingerprint (the value shipped fizzy computes).")
-              sys.exit(1)
-          print(f"OK: abi_fingerprint 0x{actual:016x} matches the abi-fingerprint input")
-          PY
+          id="${{ needs.setup.outputs.id }}"
+          test -f zig-out/sdk-meta.json || {
+            echo "::error::zig-out/sdk-meta.json missing — rebuild against a fizzy pin that emits it from fizzy.plugin.install"
+            exit 1
+          }
+          mkdir -p sdk-meta
+          cp zig-out/sdk-meta.json "sdk-meta/${{ matrix.os_arch }}.json"
+          cat "sdk-meta/${{ matrix.os_arch }}.json"
+
+          got_id=$("$py" -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "sdk-meta/${{ matrix.os_arch }}.json")
+          got_ver=$("$py" -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "sdk-meta/${{ matrix.os_arch }}.json")
+          if [ "$got_id" != "$id" ]; then
+            echo "::error::sdk-meta id ($got_id) != plugin.zig.zon id ($id)"; exit 1
+          fi
+          if [ "$got_ver" != "${{ needs.setup.outputs.version }}" ]; then
+            echo "::error::sdk-meta version ($got_ver) != release version (${{ needs.setup.outputs.version }})"; exit 1
+          fi
+
+          zon_min="${{ needs.setup.outputs.min_sdk_version }}"
+          if [ -n "$zon_min" ]; then
+            got_min=$("$py" -c 'import json,sys; print(json.load(open(sys.argv[1]))["min_sdk_version"])' "sdk-meta/${{ matrix.os_arch }}.json")
+            if [ "$got_min" != "$zon_min" ]; then
+              echo "::error::sdk-meta min_sdk_version ($got_min) != plugin.zig.zon ($zon_min)"; exit 1
+            fi
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -224,17 +281,19 @@ jobs:
         with:
           name: frag-${{ matrix.os_arch }}
           path: frag/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-meta-${{ matrix.os_arch }}
+          path: sdk-meta/*
 
   publish:
-    needs: build
+    needs: [setup, build]
     runs-on: ubuntu-latest
     steps:
-      # A reusable workflow runs in the caller's context, so this action repo's own scripts/
-      # aren't on disk — check them out explicitly. Pin to a tag in production.
       - uses: actions/checkout@v4
         with:
           repository: fizzyedit/plugin-build-action
-          ref: v2
+          ref: ${{ needs.setup.outputs.action_ref }}
           path: .plugin-build-action
 
       - uses: actions/download-artifact@v4
@@ -247,15 +306,62 @@ jobs:
           pattern: frag-*
           path: frags
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sdk-meta-*
+          path: sdk-metas
+          merge-multiple: true
+
+      - name: Consensus SDK metadata
+        id: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          shopt -s nullglob
+          files=(sdk-metas/*.json)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no sdk-meta artifacts from any target"
+            exit 1
+          fi
+          "$py" - "${files[@]}" <<'PY'
+          import json, sys
+          metas = [json.loads(open(p).read()) for p in sys.argv[1:]]
+          fps = {m["abi_fingerprint"] for m in metas}
+          sdks = {m["fizzy_sdk_version"] for m in metas}
+          mins = {m["min_sdk_version"] for m in metas}
+          if len(fps) != 1:
+              print(f"::error::targets disagree on abi_fingerprint: {sorted(fps)}")
+              sys.exit(1)
+          if len(sdks) != 1:
+              print(f"::error::targets disagree on fizzy_sdk_version: {sorted(sdks)}")
+              sys.exit(1)
+          if len(mins) != 1:
+              print(f"::error::targets disagree on min_sdk_version: {sorted(mins)}")
+              sys.exit(1)
+          m = metas[0]
+          print(f"OK: consensus from {len(metas)} cross-target(s): "
+                f"fizzy_sdk_version={m['fizzy_sdk_version']} "
+                f"abi_fingerprint={m['abi_fingerprint']} "
+                f"min_sdk_version={m['min_sdk_version']}")
+          with open("sdk-consensus.json", "w") as f:
+              json.dump(m, f, indent=2)
+              f.write("\n")
+          PY
+          {
+            echo "abi_fingerprint=$("$py" -c 'import json; print(json.load(open("sdk-consensus.json"))["abi_fingerprint"])')"
+            echo "fizzy_sdk_version=$("$py" -c 'import json; print(json.load(open("sdk-consensus.json"))["fizzy_sdk_version"])')"
+            echo "min_sdk_version=$("$py" -c 'import json; print(json.load(open("sdk-consensus.json"))["min_sdk_version"])')"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Assemble manifest.json
         run: |
           python3 .plugin-build-action/scripts/assemble_manifest.py \
-            --id "${{ inputs.id }}" \
-            --version "${{ inputs.version }}" \
-            --abi-fingerprint "${{ inputs.abi-fingerprint }}" \
-            --fizzy-sdk-version "${{ inputs.fizzy-sdk-version }}" \
-            --min-sdk-version "${{ inputs.min-sdk-version || inputs.fizzy-sdk-version }}" \
+            --id "${{ needs.setup.outputs.id }}" \
+            --version "${{ needs.setup.outputs.version }}" \
+            --abi-fingerprint "${{ steps.sdk.outputs.abi_fingerprint }}" \
+            --fizzy-sdk-version "${{ steps.sdk.outputs.fizzy_sdk_version }}" \
+            --min-sdk-version "${{ steps.sdk.outputs.min_sdk_version }}" \
             --merge-url "https://github.com/${{ github.repository }}/releases/latest/download/manifest.json" \
             --frags frags \
             --out dist/manifest.json
@@ -264,7 +370,7 @@ jobs:
       - name: Publish release (binaries + manifest)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
+          tag_name: v${{ needs.setup.outputs.version }}
           files: |
             dist/*.dylib
             dist/*.so
