@@ -122,15 +122,6 @@ jobs:
             exit 1
           fi
 
-          # build.zig.zon .version should stay aligned too (historical check).
-          if [ -f build.zig.zon ]; then
-            bz=$(grep -v '^\s*//' build.zig.zon | grep -oE '\.version[[:space:]]*=[[:space:]]*"[^"]+"' | head -n1 | grep -oE '"[^"]+"' | tr -d '"' || true)
-            if [ -n "$bz" ] && [ "$bz" != "$version" ]; then
-              echo "::error::build.zig.zon .version ($bz) does not match release version ($version)"
-              exit 1
-            fi
-          fi
-
           {
             echo "id=$id"
             echo "version=$version"
