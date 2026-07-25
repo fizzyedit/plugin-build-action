@@ -9,10 +9,11 @@
 # fizzy_sdk_version + abi_fingerprint are derived from the built ReleaseFast dylib (they are
 # whatever your pinned fizzy commit embeds). Do not copy them into this file.
 #
-# Prerequisite: your build.zig.zon must pin the Fizzy SDK by URL+hash (not a local `path`):
+# Prerequisite: your build.zig.zon must pin the Fizzy SDK release asset by URL+hash
+# (not a local `path`, and not the git archive of an sdk-v* tag — that is the monorepo):
 #
 #     .fizzy = .{
-#         .url = "https://github.com/fizzyedit/fizzy/archive/<commit>.tar.gz",
+#         .url = "https://github.com/fizzyedit/fizzy/releases/download/sdk-v0.1.42/fizzy-sdk-v0.1.42.tar.gz",
 #         .hash = "<zig-package-hash>",
 #     },
 #

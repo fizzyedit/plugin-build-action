@@ -38,20 +38,20 @@ manifest.json            ← references the binaries above (url + sha256), accum
 ## Setup (once per plugin repo)
 
 1. **Pin the Fizzy SDK by URL in your `build.zig.zon`** — *not* a local `path`. CI has no sibling
-   checkout, so a `.path = "../../fizzy"` dependency fails there. Use a fetchable archive:
+   checkout, so a `.path = "../../fizzy/sdk"` dependency fails there. Pin the **SDK release
+   asset** for an `sdk-v*` tag (not the git archive of the monorepo — that pulls Velopack):
 
    ```zig
    .fizzy = .{
-       .url = "https://github.com/fizzyedit/fizzy/archive/<commit>.tar.gz",
-       .hash = "<zig-package-hash>",
+       .url = "https://github.com/fizzyedit/fizzy/releases/download/sdk-v0.1.42/fizzy-sdk-v0.1.42.tar.gz",
+       .hash = "<zig-package-hash>", // zig fetch --save=fizzy <url>
    },
    ```
 
    That pin is the source of truth for `fizzy_sdk_version` and the ReleaseFast
    `abi_fingerprint` — the action reads both from the built dylib. You never copy them into
    workflow YAML. See fizzy's
-   [`docs/PLUGINS.md`](https://github.com/fizzyedit/fizzy/blob/main/docs/PLUGINS.md) §5 for the
-   fingerprint distinction.
+   [`docs/PLUGINS.md`](https://github.com/fizzyedit/fizzy/blob/main/docs/PLUGINS.md) §2.3 / §5.
 
 2. **Add identity-only `plugin.zig.zon`** at the repo root (`id` / `name` / `version` /
    `min_sdk_version`). The pushed tag (`vX.Y.Z`) **must equal** `.version`.
