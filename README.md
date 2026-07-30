@@ -109,6 +109,17 @@ binary instead of seeing *"needs a rebuild."*
 
 ## Changelog
 
+### v4 (pending — not yet tagged)
+
+- `manifest.json` now carries top-level `name`/`description`/`tags`, read straight off the
+  caller's `plugin.zig.zon` (`scripts/read_plugin_zon.py`) and passed through `assemble_manifest.py`'s
+  new `--name`/`--description`/`--tags-json` args. This lets the `fizzyedit/plugins` aggregator
+  fall back to these when a `registry/<id>.json` entry leaves its own `description`/`tags` blank,
+  instead of requiring authors to hand-duplicate both.
+- A tag bump (not just an additive change) because callers pin `uses: .../build.yml@v3`, and this
+  file's own "Resolve plugin-build-action ref" step hardcodes the matching `ref="v3"` literal for
+  its auxiliary script checkout — neither picks up new script behavior without the ref moving.
+
 ### v3
 
 - Derive `fizzy_sdk_version` + `abi_fingerprint` from `zig-out/sdk-meta.json` (emitted by

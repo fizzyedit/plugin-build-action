@@ -2,8 +2,10 @@
 """Merge per-target sha256 fragments into a Fizzy plugin `manifest.json`.
 
 Each build job emits one fragment `{ "os_arch", "url", "sha256" }`; this collects them into a
-single release with the shared identity metadata (version, abi_fingerprint, sdk versions). The
-output schema is exactly what `fizzyedit/plugins` aggregates and what Fizzy's store reads
+single release with the shared identity metadata (version, abi_fingerprint, sdk versions), plus
+top-level `name`/`description`/`tags` straight off `plugin.zig.zon`. The output schema is exactly
+what `fizzyedit/plugins` aggregates (falling back to these when a `registry/<id>.json` entry
+leaves its own copies blank — see that repo's `store/src/ingest.zig`) and what Fizzy's store reads
 (see the host's `src/backend/plugin_store/registry.zig`). Stdlib only.
 """
 from __future__ import annotations
@@ -39,12 +41,19 @@ def main() -> int:
     ap.add_argument("--abi-fingerprint", required=True)
     ap.add_argument("--fizzy-sdk-version", required=True)
     ap.add_argument("--min-sdk-version", required=True)
+    ap.add_argument("--name", default="", help="plugin.zig.zon .name (optional, informational)")
+    ap.add_argument("--description", default="", help="plugin.zig.zon .description (optional)")
+    ap.add_argument("--tags-json", default="[]", help="plugin.zig.zon .tags as a JSON array (optional)")
     ap.add_argument("--frags", required=True, help="directory of <os-arch>.json fragments")
     ap.add_argument("--out", required=True)
     ap.add_argument("--published", default=datetime.date.today().isoformat())
     ap.add_argument("--merge-url", default="",
                     help="prior manifest.json URL to accumulate releases from (never rewrite history)")
     args = ap.parse_args()
+
+    tags = json.loads(args.tags_json)
+    if not isinstance(tags, list):
+        raise SystemExit(f"--tags-json must be a JSON array, got: {args.tags_json!r}")
 
     downloads: dict[str, dict] = {}
     for frag_path in sorted(Path(args.frags).glob("*.json")):
@@ -72,7 +81,13 @@ def main() -> int:
     ]
     releases.append(new_release)
 
-    manifest = {"id": args.id, "releases": releases}
+    manifest = {
+        "id": args.id,
+        "name": args.name,
+        "description": args.description,
+        "tags": tags,
+        "releases": releases,
+    }
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

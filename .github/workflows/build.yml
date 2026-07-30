@@ -51,6 +51,9 @@ jobs:
       id: ${{ steps.meta.outputs.id }}
       version: ${{ steps.meta.outputs.version }}
       min_sdk_version: ${{ steps.meta.outputs.min_sdk_version }}
+      name: ${{ steps.meta.outputs.name }}
+      description: ${{ steps.meta.outputs.description }}
+      tags_json: ${{ steps.meta.outputs.tags_json }}
       action_ref: ${{ steps.action_ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
@@ -96,6 +99,9 @@ jobs:
           zon_id=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
           zon_version=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["version"])')
           zon_min=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["min_sdk_version"])')
+          zon_name=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+          zon_description=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["description"])')
+          zon_tags_json=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["tags"]))')
 
           id="${{ inputs.id }}"
           [ -n "$id" ] || id="$zon_id"
@@ -126,6 +132,11 @@ jobs:
             echo "id=$id"
             echo "version=$version"
             echo "min_sdk_version=$zon_min"
+            echo "name=$zon_name"
+            echo "tags_json=$zon_tags_json"
+            echo "description<<PLUGIN_ZON_DESCRIPTION_EOF"
+            echo "$zon_description"
+            echo "PLUGIN_ZON_DESCRIPTION_EOF"
           } >> "$GITHUB_OUTPUT"
           echo "OK: id=$id version=$version min_sdk_version=${zon_min:-"(default to pinned sdk)"}"
 
@@ -354,6 +365,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Assemble manifest.json
+        env:
+          # Routed through env vars rather than direct ${{ }} interpolation into the script body:
+          # these three come from the caller's own plugin.zig.zon (name/tags free-form, could
+          # contain shell metacharacters like a stray quote) — expanding them straight into the
+          # `run:` script text would be a classic Actions script-injection hole.
+          PLUGIN_NAME: ${{ needs.setup.outputs.name }}
+          PLUGIN_DESCRIPTION: ${{ needs.setup.outputs.description }}
+          PLUGIN_TAGS_JSON: ${{ needs.setup.outputs.tags_json }}
         run: |
           python3 .plugin-build-action/scripts/assemble_manifest.py \
             --id "${{ needs.setup.outputs.id }}" \
@@ -361,6 +380,9 @@ jobs:
             --abi-fingerprint "${{ steps.sdk.outputs.abi_fingerprint }}" \
             --fizzy-sdk-version "${{ steps.sdk.outputs.fizzy_sdk_version }}" \
             --min-sdk-version "${{ steps.sdk.outputs.min_sdk_version }}" \
+            --name "$PLUGIN_NAME" \
+            --description "$PLUGIN_DESCRIPTION" \
+            --tags-json "$PLUGIN_TAGS_JSON" \
             --merge-url "https://github.com/${{ github.repository }}/releases/latest/download/manifest.json" \
             --frags frags \
             --out dist/manifest.json

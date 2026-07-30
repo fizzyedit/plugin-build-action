@@ -2,10 +2,11 @@
 """Read identity fields from a Fizzy plugin's root `plugin.zig.zon`.
 
 Prints a single JSON object on stdout:
-  { "id", "name", "version", "min_sdk_version" }
+  { "id", "name", "version", "min_sdk_version", "description", "tags" }
 
 `min_sdk_version` may be "" (empty) — the build defaults it to the pinned fizzy
-`sdk_version` at compile time. Stdlib only.
+`sdk_version` at compile time. `description`/`tags` may be "" / [] — both are optional fields
+on the author's `plugin.zig.zon` (see fizzy's `src/sdk/manifest.zig`). Stdlib only.
 """
 from __future__ import annotations
 
@@ -24,6 +25,16 @@ def _field(text: str, key: str) -> str | None:
     )
     m = pat.search(text)
     return m.group(1) if m else None
+
+
+def _array_field(text: str, key: str) -> list[str]:
+    # Match `.key = .{ "a", "b", ... }`, possibly spanning multiple lines — good enough for the
+    # plain string-literal arrays plugin.zig.zon actually declares (no nested structs/exprs).
+    pat = re.compile(rf'\.{re.escape(key)}\s*=\s*\.\{{(.*?)\}}', re.DOTALL)
+    m = pat.search(text)
+    if not m:
+        return []
+    return re.findall(r'"([^"]*)"', m.group(1))
 
 
 def main() -> int:
@@ -46,6 +57,8 @@ def main() -> int:
         "name": _field(text, "name") or plugin_id,
         "version": version,
         "min_sdk_version": _field(text, "min_sdk_version") or "",
+        "description": _field(text, "description") or "",
+        "tags": _array_field(text, "tags"),
     }
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")
