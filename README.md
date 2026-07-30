@@ -70,7 +70,7 @@ manifest.json            ← references the binaries above (url + sha256), accum
        tags: ["v*"]
    jobs:
      build:
-       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v3
+       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v4
        permissions:
          contents: write
        with:
@@ -109,7 +109,7 @@ binary instead of seeing *"needs a rebuild."*
 
 ## Changelog
 
-### v4 (pending — not yet tagged)
+### v4
 
 - `manifest.json` now carries top-level `name`/`description`/`tags`, read straight off the
   caller's `plugin.zig.zon` (`scripts/read_plugin_zon.py`) and passed through `assemble_manifest.py`'s
