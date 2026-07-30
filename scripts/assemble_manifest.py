@@ -44,6 +44,8 @@ def main() -> int:
     ap.add_argument("--name", default="", help="plugin.zig.zon .name (optional, informational)")
     ap.add_argument("--description", default="", help="plugin.zig.zon .description (optional)")
     ap.add_argument("--tags-json", default="[]", help="plugin.zig.zon .tags as a JSON array (optional)")
+    ap.add_argument("--author", default="", help="plugin.zig.zon .author (optional, cosmetic)")
+    ap.add_argument("--author-url", default="", help="plugin.zig.zon .author_url (optional)")
     ap.add_argument("--frags", required=True, help="directory of <os-arch>.json fragments")
     ap.add_argument("--out", required=True)
     ap.add_argument("--published", default=datetime.date.today().isoformat())
@@ -86,6 +88,8 @@ def main() -> int:
         "name": args.name,
         "description": args.description,
         "tags": tags,
+        "author": args.author,
+        "author_url": args.author_url,
         "releases": releases,
     }
 

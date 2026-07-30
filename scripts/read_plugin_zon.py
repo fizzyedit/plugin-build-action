@@ -2,7 +2,7 @@
 """Read identity fields from a Fizzy plugin's root `plugin.zig.zon`.
 
 Prints a single JSON object on stdout:
-  { "id", "name", "version", "min_sdk_version", "description", "tags" }
+  { "id", "name", "version", "min_sdk_version", "description", "tags", "author", "author_url" }
 
 `min_sdk_version` may be "" (empty) — the build defaults it to the pinned fizzy
 `sdk_version` at compile time. `description`/`tags` may be "" / [] — both are optional fields
@@ -59,6 +59,8 @@ def main() -> int:
         "min_sdk_version": _field(text, "min_sdk_version") or "",
         "description": _field(text, "description") or "",
         "tags": _array_field(text, "tags"),
+        "author": _field(text, "author") or "",
+        "author_url": _field(text, "author_url") or "",
     }
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")

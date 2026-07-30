@@ -54,6 +54,8 @@ jobs:
       name: ${{ steps.meta.outputs.name }}
       description: ${{ steps.meta.outputs.description }}
       tags_json: ${{ steps.meta.outputs.tags_json }}
+      author: ${{ steps.meta.outputs.author }}
+      author_url: ${{ steps.meta.outputs.author_url }}
       action_ref: ${{ steps.action_ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +104,8 @@ jobs:
           zon_name=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["name"])')
           zon_description=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["description"])')
           zon_tags_json=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["tags"]))')
+          zon_author=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["author"])')
+          zon_author_url=$(printf '%s' "$zon" | "$py" -c 'import json,sys; print(json.load(sys.stdin)["author_url"])')
 
           id="${{ inputs.id }}"
           [ -n "$id" ] || id="$zon_id"
@@ -134,6 +138,8 @@ jobs:
             echo "min_sdk_version=$zon_min"
             echo "name=$zon_name"
             echo "tags_json=$zon_tags_json"
+            echo "author=$zon_author"
+            echo "author_url=$zon_author_url"
             echo "description<<PLUGIN_ZON_DESCRIPTION_EOF"
             echo "$zon_description"
             echo "PLUGIN_ZON_DESCRIPTION_EOF"
@@ -373,6 +379,8 @@ jobs:
           PLUGIN_NAME: ${{ needs.setup.outputs.name }}
           PLUGIN_DESCRIPTION: ${{ needs.setup.outputs.description }}
           PLUGIN_TAGS_JSON: ${{ needs.setup.outputs.tags_json }}
+          PLUGIN_AUTHOR: ${{ needs.setup.outputs.author }}
+          PLUGIN_AUTHOR_URL: ${{ needs.setup.outputs.author_url }}
         run: |
           python3 .plugin-build-action/scripts/assemble_manifest.py \
             --id "${{ needs.setup.outputs.id }}" \
@@ -383,6 +391,8 @@ jobs:
             --name "$PLUGIN_NAME" \
             --description "$PLUGIN_DESCRIPTION" \
             --tags-json "$PLUGIN_TAGS_JSON" \
+            --author "$PLUGIN_AUTHOR" \
+            --author-url "$PLUGIN_AUTHOR_URL" \
             --merge-url "https://github.com/${{ github.repository }}/releases/latest/download/manifest.json" \
             --frags frags \
             --out dist/manifest.json
