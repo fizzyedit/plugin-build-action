@@ -72,7 +72,7 @@ manifest.json            ← references the binaries above (url + sha256), accum
        tags: ["v*"]
    jobs:
      build:
-       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v4
+       uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v5
        permissions:
          contents: write
        with:
@@ -122,13 +122,14 @@ binary instead of seeing *"needs a rebuild."*
   file's own "Resolve plugin-build-action ref" step hardcodes the matching `ref="v3"` literal for
   its auxiliary script checkout — neither picks up new script behavior without the ref moving.
 
-### v4.1
+### v5
 
 - Build a seventh target, `web-wasm32`: the wasm side module the fizzy web app fetches and links
   at runtime. Best-effort (`continue-on-error`), so it cannot fail a release for a plugin that
   does not build for the browser.
-- No tag bump: the scripts' interface is unchanged (the manifest simply gains one more
-  `downloads` entry), so the `v4` tag moves and the hardcoded `ref="v4"` above stays correct.
+- Carry `author` / `author_url` from `plugin.zig.zon` into `manifest.json`.
+- As in v4, the "Resolve plugin-build-action ref" step's hardcoded literal moves with the tag
+  (now `ref="v5"`), so a later script change under v5 is actually picked up.
 - The release job's consensus check still requires every target that *did* build to agree on
   `abi_fingerprint` / `fizzy_sdk_version` — the fingerprint is structural, so a wasm build
   reports the same value a native one does and adding the target does not disturb it.

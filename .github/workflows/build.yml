@@ -76,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ref="v4"
+          ref="v5"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Using plugin-build-action@$ref for scripts"
 
