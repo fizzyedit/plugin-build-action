@@ -36,24 +36,16 @@ For a tag like `v0.1.0`, the release gets:
 manifest.json            ← references the binaries above (url + sha256), accumulating older releases
 ```
 
-## The web module goes to Pages, not to the release
+## The web module is a release asset like the rest
 
-A browser can only fetch a plugin over CORS, and GitHub **release assets send no
-`access-control-allow-origin` header at all** — a `fetch()` for one fails before a byte moves.
-GitHub **Pages** sends `*`. So `<id>-web-wasm32.wasm` is published to the caller repo's
-`gh-pages` branch under `web/v<version>/`, and that is the URL the manifest advertises; the six
-desktop binaries stay release assets, where no browser is involved.
+All seven binaries are release assets, `<id>-web-wasm32.wasm` included. There is one publishing
+story and it is the same on every target — host wherever you like, nothing to enable.
 
-Two consequences worth knowing:
-
-- **Pages has to be on.** Settings › Pages › Source: *Deploy from a branch* › `gh-pages` /
-  `(root)`. A workflow cannot enable it, so the release logs a notice instead; until it is on,
-  the web download 404s while the desktop ones work.
-- **Old versions are left in place.** Each release adds `web/v<version>/` and touches nothing
-  else, so a fizzy pinned to an older SDK keeps resolving the build it was matched with — the
-  same promise release assets make.
-
-Set `pages-url` if the repo serves Pages from a custom domain.
+A browser cannot fetch a release asset directly (GitHub sends no `access-control-allow-origin`
+on them), but that is a *client* problem and fizzy solves it client-side: the web app tries the
+URL directly, and falls back to a CORS proxy on its own origin when the host does not allow it.
+A plugin published on a host that does send CORS is fetched directly and never touches the
+proxy. Either way the author publishes one set of assets and this workflow uploads them.
 
 ## Setup (once per plugin repo)
 
@@ -183,7 +175,6 @@ Initial release.
 | `version` | no | tag without `v` | Override release version (must match `plugin.zig.zon` `.version`). |
 | `artifact-path` | no | `zig-out/<id>` | Built dylib path (relative to repo root) **without** extension. |
 | `targets` | no | all 7 | Comma-separated `os_arch` subset to build. Pass the six desktop keys to skip the web build entirely. |
-| `pages-url` | no | `https://<owner>.github.io/<repo>` | Base URL the web module is served from, no trailing slash. Set it when the repo's Pages uses a custom domain. |
 
 ### Secrets
 
