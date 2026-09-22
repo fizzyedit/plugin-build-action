@@ -36,6 +36,17 @@ on:
         required: false
         type: string
         default: ""
+      pages-url:
+        description: >-
+          Base URL the plugin's web module is served from, no trailing slash — e.g.
+          "https://fizzyedit.github.io/drive" (the default for this repo) or a custom domain
+          like "https://drive.fizzyed.it". A browser can only fetch a plugin over CORS, and
+          GitHub *release assets* send no CORS headers at all, so the `web-wasm32` download is
+          published to the caller's GitHub Pages instead of attached to the release. Pages
+          serves `access-control-allow-origin: *`.
+        required: false
+        type: string
+        default: ""
     secrets:
       build_env:
         description: >-
@@ -314,7 +325,18 @@ jobs:
             sum=$(shasum -a 256 "$src" | awk '{print $1}')
           fi
 
-          url="https://github.com/${{ github.repository }}/releases/download/v${version}/${asset}"
+          # Where a browser will fetch this from. Only the web module differs: release assets
+          # carry no `access-control-allow-origin`, so a `fetch()` for one fails before it
+          # starts — the download has to come from Pages (published in the release job below).
+          # Versioned in the path so an older fizzy keeps resolving the build it was matched
+          # with, the same promise the release assets make.
+          if [ "${{ matrix.os_arch }}" = "web-wasm32" ]; then
+            pages="${{ inputs.pages-url }}"
+            [ -n "$pages" ] || pages="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+            url="${pages}/web/v${version}/${asset}"
+          else
+            url="https://github.com/${{ github.repository }}/releases/download/v${version}/${asset}"
+          fi
           printf '{"os_arch":"%s","url":"%s","sha256":"%s"}\n' \
             "${{ matrix.os_arch }}" "$url" "$sum" > "frag/${{ matrix.os_arch }}.json"
           cat "frag/${{ matrix.os_arch }}.json"
@@ -460,6 +482,90 @@ jobs:
             --frags frags \
             --out dist/manifest.json
           echo "----- manifest.json -----"; cat dist/manifest.json
+
+      # A manifest entry is a promise that an asset of that name will be on the release. The
+      # web target broke that promise silently once: its job built and staged a fragment, the
+      # upload globs below listed dylib/so/dll and not wasm, and the published manifest pointed
+      # at a `…-web-wasm32.wasm` that 404s — an install that fails with nothing to see. Check
+      # the promise here rather than discovering it from a user.
+      - name: Every advertised download exists in dist/
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r name; do
+            if [ ! -f "dist/$name" ]; then
+              echo "::error::manifest advertises $name but it is not in dist/ — it will 404"
+              missing=1
+            fi
+          done < <(python3 -c '
+          import json, sys
+          m = json.load(open("dist/manifest.json"))
+          for rel in m.get("releases", []):
+              if rel.get("version") != sys.argv[1]:
+                  continue
+              for d in rel.get("downloads", {}).values():
+                  print(d["url"].rsplit("/", 1)[-1])
+          ' "${{ needs.setup.outputs.version }}")
+          # Every file is checked against `dist/` whether it ends up on the release or on Pages:
+          # both are published from there, and the promise the manifest makes is the same one.
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every advertised download is present"
+
+      # The web module goes to Pages rather than onto the release, because that is the only one
+      # of the two a browser can fetch: release assets send no `access-control-allow-origin`, so
+      # `fetch()` fails before a byte moves. Pages sends `*`.
+      #
+      # Written to an orphan `gh-pages` branch in the *caller's* repo, under `web/v<version>/`,
+      # and older versions are left alone — a fizzy pinned to an older SDK keeps resolving the
+      # build it was matched with. `.nojekyll` stops Pages from filtering the directory.
+      - name: Publish the web module to Pages
+        if: hashFiles('dist/*.wasm') != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.setup.outputs.version }}"
+          work="$RUNNER_TEMP/pages"
+          repo="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git clone --depth 1 --branch gh-pages "$repo" "$work" 2>/dev/null; then
+            echo "gh-pages exists"
+          else
+            echo "creating gh-pages"
+            rm -rf "$work"   # a failed --branch clone can leave a partial directory behind
+            git clone --depth 1 "$repo" "$work"
+            git -C "$work" checkout --orphan gh-pages
+            git -C "$work" rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "$work/web/v${version}"
+          cp dist/*.wasm "$work/web/v${version}/"
+          touch "$work/.nojekyll"
+
+          git -C "$work" add -A
+          if git -C "$work" diff --cached --quiet; then
+            echo "nothing changed on gh-pages"
+            exit 0
+          fi
+          git -C "$work" commit -m "web module for v${version}"
+          git -C "$work" push origin gh-pages
+          echo "published: $(ls dist/*.wasm | xargs -n1 basename | tr '\n' ' ')"
+
+      # Pages has to be serving that branch for the URL in the manifest to resolve. It is a
+      # repo setting, not something a workflow can turn on, so say so once rather than leaving
+      # a 404 to be discovered by a user mid-install.
+      - name: Remind about Pages
+        if: hashFiles('dist/*.wasm') != ''
+        shell: bash
+        run: |
+          echo "::notice::A web module was published to gh-pages. If this is the first release" \
+               "with one, enable Pages for this repo: Settings › Pages › Source: Deploy from a" \
+               "branch › gh-pages / (root). Until then the web-wasm32 download 404s."
 
       - name: Publish release (binaries + manifest)
         uses: softprops/action-gh-release@v2

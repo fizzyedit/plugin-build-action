@@ -32,10 +32,28 @@ For a tag like `v0.1.0`, the release gets:
 <id>-macos-aarch64.dylib     <id>-macos-x86_64.dylib
 <id>-linux-x86_64.so         <id>-linux-aarch64.so
 <id>-windows-x86_64.dll      <id>-windows-aarch64.dll
-<id>-web-wasm32.wasm         ← best-effort: a wasm side module the fizzy web app loads at runtime;
-                                a plugin that cannot build for the browser simply has no web download
+(the web module is **not** a release asset — see below)
 manifest.json            ← references the binaries above (url + sha256), accumulating older releases
 ```
+
+## The web module goes to Pages, not to the release
+
+A browser can only fetch a plugin over CORS, and GitHub **release assets send no
+`access-control-allow-origin` header at all** — a `fetch()` for one fails before a byte moves.
+GitHub **Pages** sends `*`. So `<id>-web-wasm32.wasm` is published to the caller repo's
+`gh-pages` branch under `web/v<version>/`, and that is the URL the manifest advertises; the six
+desktop binaries stay release assets, where no browser is involved.
+
+Two consequences worth knowing:
+
+- **Pages has to be on.** Settings › Pages › Source: *Deploy from a branch* › `gh-pages` /
+  `(root)`. A workflow cannot enable it, so the release logs a notice instead; until it is on,
+  the web download 404s while the desktop ones work.
+- **Old versions are left in place.** Each release adds `web/v<version>/` and touches nothing
+  else, so a fizzy pinned to an older SDK keeps resolving the build it was matched with — the
+  same promise release assets make.
+
+Set `pages-url` if the repo serves Pages from a custom domain.
 
 ## Setup (once per plugin repo)
 
@@ -165,6 +183,7 @@ Initial release.
 | `version` | no | tag without `v` | Override release version (must match `plugin.zig.zon` `.version`). |
 | `artifact-path` | no | `zig-out/<id>` | Built dylib path (relative to repo root) **without** extension. |
 | `targets` | no | all 7 | Comma-separated `os_arch` subset to build. Pass the six desktop keys to skip the web build entirely. |
+| `pages-url` | no | `https://<owner>.github.io/<repo>` | Base URL the web module is served from, no trailing slash. Set it when the repo's Pages uses a custom domain. |
 
 ### Secrets
 
