@@ -6,7 +6,7 @@ name: Build Fizzy plugin
 #
 # Identity (`id` / `version` / `min_sdk_version`) comes from the caller's `plugin.zig.zon`.
 # `fizzy_sdk_version` + `abi_fingerprint` come from `zig-out/sdk-meta.json` (emitted by
-# `fizzy.plugin.install`). All 6 targets cross-compile from ubuntu-latest — no macOS/Windows
+# `fizzy.plugin.install`). All 7 targets cross-compile from ubuntu-latest — no macOS/Windows
 # runners, no signing, no dlopen. Do not hand-copy sdk/fingerprint into caller YAML.
 on:
   workflow_call:
@@ -32,16 +32,13 @@ on:
         type: string
         default: ""
       targets:
-        description: "Comma-separated os_arch subset to build (default: all 6). E.g. 'macos-aarch64,macos-x86_64,linux-x86_64,linux-aarch64'."
+        description: "Comma-separated os_arch subset to build (default: all 7). Pass the six desktop keys to skip web-wasm32. E.g. 'macos-aarch64,macos-x86_64,linux-x86_64,linux-aarch64'."
         required: false
         type: string
         default: ""
 
 permissions:
   contents: write
-
-env:
-  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zig-global-cache
 
 jobs:
   setup:
@@ -161,7 +158,8 @@ jobs:
             {"os_arch":"linux-x86_64","zig_target":"x86_64-linux-gnu","ext":"so"},
             {"os_arch":"linux-aarch64","zig_target":"aarch64-linux-gnu","ext":"so"},
             {"os_arch":"windows-x86_64","zig_target":"x86_64-windows","ext":"dll"},
-            {"os_arch":"windows-aarch64","zig_target":"aarch64-windows","ext":"dll"}
+            {"os_arch":"windows-aarch64","zig_target":"aarch64-windows","ext":"dll"},
+            {"os_arch":"web-wasm32","zig_target":"wasm32-freestanding","ext":"wasm"}
           ]'
           targets="${{ inputs.targets }}"
           if [ -z "$targets" ]; then
@@ -183,6 +181,10 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
     runs-on: ubuntu-latest
+    # The web build (a wasm side module the browser links at runtime) is best-effort: a plugin
+    # that leans on libc, threads or processes has no browser form, and that costs it the
+    # web download for this release rather than the release. The desktop targets must build.
+    continue-on-error: ${{ matrix.os_arch == 'web-wasm32' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -192,16 +194,24 @@ jobs:
           ref: ${{ needs.setup.outputs.action_ref }}
           path: .plugin-build-action
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ inputs.zig-version }}
+          cache-key: ${{ hashFiles('**/build.zig.zon') }}
+
+      # setup-zig exports ZIG_GLOBAL_CACHE_DIR / ZIG_LOCAL_CACHE_DIR and caches that
+      # directory across runs, so these steps must come AFTER it and must NOT override
+      # those vars: pointing them at a workspace path leaves the action's cache empty,
+      # and all six matrix jobs then re-download every dependency from
+      # codeload.github.com on every release — which is where `HttpConnectionClosing`
+      # comes from. (Zig 0.16 caches the downloaded tarballs under $ZIG_GLOBAL_CACHE_DIR/p
+      # and unpacks them into the project-local zig-pkg/; only the tarballs are cached.)
       - name: Pre-create Zig cache tmp/
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
           mkdir -p "${ZIG_LOCAL_CACHE_DIR:-$GITHUB_WORKSPACE/.zig-cache}/tmp"
-
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ inputs.zig-version }}
 
       # Zig 0.16's HTTP client doesn't retry on `HttpConnectionClosing` from GitHub.
       # Pre-fetch deps in a retry loop (separate from the build) so flaky Windows CI
@@ -228,7 +238,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}
+          # The fetch step above is the only place with retries, but a lazy dep reached
+          # only here would still be fetched by Zig's no-retry HTTP client. Retry ONLY
+          # on a network-shaped failure — a real compile error must fail fast.
+          log="$RUNNER_TEMP/build-${{ matrix.os_arch }}.log"
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }} 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if ! grep -Eq 'HttpConnectionClosing|invalid HTTP response|TlsInitializationFailed|ConnectionResetByPeer|TemporaryNameServerFailure|unable to fetch|connection reset' "$log"; then
+              echo "Build failed for a non-network reason; not retrying."
+              exit 1
+            fi
+            n=$((n+1))
+            echo "Build attempt $n hit a network error, sleeping $((n*15))s..."
+            sleep $((n*15))
+          done
+          echo "Build failed after $n network retries"; exit 1
 
       - name: Stage binary + sha256 fragment
         shell: bash

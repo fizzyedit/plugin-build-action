@@ -32,6 +32,8 @@ For a tag like `v0.1.0`, the release gets:
 <id>-macos-aarch64.dylib     <id>-macos-x86_64.dylib
 <id>-linux-x86_64.so         <id>-linux-aarch64.so
 <id>-windows-x86_64.dll      <id>-windows-aarch64.dll
+<id>-web-wasm32.wasm         ← best-effort: a wasm side module the fizzy web app loads at runtime;
+                                a plugin that cannot build for the browser simply has no web download
 manifest.json            ← references the binaries above (url + sha256), accumulating older releases
 ```
 
@@ -120,6 +122,17 @@ binary instead of seeing *"needs a rebuild."*
   file's own "Resolve plugin-build-action ref" step hardcodes the matching `ref="v3"` literal for
   its auxiliary script checkout — neither picks up new script behavior without the ref moving.
 
+### v4.1
+
+- Build a seventh target, `web-wasm32`: the wasm side module the fizzy web app fetches and links
+  at runtime. Best-effort (`continue-on-error`), so it cannot fail a release for a plugin that
+  does not build for the browser.
+- No tag bump: the scripts' interface is unchanged (the manifest simply gains one more
+  `downloads` entry), so the `v4` tag moves and the hardcoded `ref="v4"` above stays correct.
+- The release job's consensus check still requires every target that *did* build to agree on
+  `abi_fingerprint` / `fizzy_sdk_version` — the fingerprint is structural, so a wasm build
+  reports the same value a native one does and adding the target does not disturb it.
+
 ### v3
 
 - Derive `fizzy_sdk_version` + `abi_fingerprint` from `zig-out/sdk-meta.json` (emitted by
@@ -150,15 +163,21 @@ Initial release.
 | `id` | no | `plugin.zig.zon` `.id` | Override plugin id (must match the zon if set). |
 | `version` | no | tag without `v` | Override release version (must match `plugin.zig.zon` `.version`). |
 | `artifact-path` | no | `zig-out/<id>` | Built dylib path (relative to repo root) **without** extension. |
-| `targets` | no | all 6 | Comma-separated `os_arch` subset to build. |
+| `targets` | no | all 7 | Comma-separated `os_arch` subset to build. Pass the six desktop keys to skip the web build entirely. |
 
 ## How it works
 
 - **Setup** reads `plugin.zig.zon`, checks the tag/`version` input against `.version`, and builds
   the target matrix.
-- **One build per target across all 6 host arches**, all cross-compiled with `-Dtarget=` from
-  `ubuntu-latest`. Plugins are unsigned pure Zig + vendored C (optional prebuilt `.a`/`.lib`
+- **One build per target across the 6 desktop host arches**, all cross-compiled with `-Dtarget=`
+  from `ubuntu-latest`. Plugins are unsigned pure Zig + vendored C (optional prebuilt `.a`/`.lib`
   deps are selected per target), so there is no macOS/Windows runner or signing step.
+- **Plus `web-wasm32`, best-effort.** That job is `continue-on-error`, so a plugin that cannot
+  build for the browser — C deps, threads, anything the freestanding target has no answer for —
+  loses only its web download, never the release. Its job shows red in the run while the run
+  itself stays green; pass an explicit `targets` list to stop building it at all. The fizzy web
+  app lists only plugins whose release has a binary for the host it is running on, so a
+  desktop-only plugin is simply absent from the store in the browser, not broken in it.
 - Every target collects `zig-out/sdk-meta.json` (written by the fizzy pin at build time). Publish
   requires all targets to agree on sdk/fingerprint, then
   [`scripts/assemble_manifest.py`](scripts/assemble_manifest.py) merges the new release into the
