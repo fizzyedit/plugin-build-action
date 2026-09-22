@@ -36,6 +36,16 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      build_env:
+        description: >-
+          Environment for every `zig build` in this workflow, as KEY=VALUE lines. For a plugin
+          whose build bakes in an app credential it cannot commit — `fizzyedit/drive` writes its
+          `credentials.zon` from FIZZY_DRIVE_CLIENT_ID and friends. One secret rather than a
+          named list, so a plugin's own variables never have to be declared in this shared
+          workflow. Omit it and the build runs with nothing extra, which for drive means a
+          binary that compiles and then declines to sign in.
+        required: false
 
 permissions:
   contents: write
@@ -216,6 +226,32 @@ jobs:
       # Zig 0.16's HTTP client doesn't retry on `HttpConnectionClosing` from GitHub.
       # Pre-fetch deps in a retry loop (separate from the build) so flaky Windows CI
       # fetches don't fail the whole matrix job. See fizzy .github/workflows/ci.yml.
+      # Before the first `zig build` of any kind, including the fetch below: a build script that
+      # generates a file from these variables typically skips the work when the file already
+      # exists, so an empty one written by the fetch step would be the one that shipped.
+      #
+      # Through `$GITHUB_ENV` so it reaches every later step rather than just one `run:` block.
+      # Values are masked in the log by Actions; nothing here echoes them.
+      - name: Build environment from the `build_env` secret
+        shell: bash
+        env:
+          BUILD_ENV: ${{ secrets.build_env }}
+        run: |
+          set -euo pipefail
+          [ -n "${BUILD_ENV:-}" ] || { echo "no build_env secret; building with none"; exit 0; }
+          n=0
+          while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*)
+                printf '%s\n' "$line" >> "$GITHUB_ENV"
+                n=$((n+1))
+                ;;
+              *) echo "::warning::build_env: ignoring a line that is not KEY=VALUE" ;;
+            esac
+          done <<< "$BUILD_ENV"
+          echo "build_env: exported $n variable(s)"
+
       - name: Fetch dependencies (with retries)
         shell: bash
         run: |

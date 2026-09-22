@@ -166,6 +166,30 @@ Initial release.
 | `artifact-path` | no | `zig-out/<id>` | Built dylib path (relative to repo root) **without** extension. |
 | `targets` | no | all 7 | Comma-separated `os_arch` subset to build. Pass the six desktop keys to skip the web build entirely. |
 
+### Secrets
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `build_env` | no | Environment for every `zig build` in the workflow, as `KEY=VALUE` lines. For a plugin whose build bakes in an app credential it cannot commit. |
+
+```yaml
+jobs:
+  build:
+    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v5
+    permissions:
+      contents: write
+    with:
+      zig-version: "0.16.0"
+    secrets:
+      build_env: ${{ secrets.PLUGIN_BUILD_ENV }}
+```
+
+One blob rather than a named list, so a single plugin's variables never have to be declared in
+this shared workflow. It is exported before the *first* `zig build` — including the pre-fetch —
+because a build script that generates a file from these variables usually skips the work when
+the file is already there, and an empty one written during the fetch would otherwise be the one
+that ships.
+
 ## How it works
 
 - **Setup** reads `plugin.zig.zon`, checks the tag/`version` input against `.version`, and builds
