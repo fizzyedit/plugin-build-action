@@ -213,6 +213,9 @@ that ships.
   itself stays green; pass an explicit `targets` list to stop building it at all. The fizzy web
   app lists only plugins whose release has a binary for the host it is running on, so a
   desktop-only plugin is simply absent from the store in the browser, not broken in it.
+- **Optimize mode:** desktop targets build `ReleaseFast`; `web-wasm32` builds `ReleaseSmall`,
+  since the browser fetches and compiles the whole module before the plugin loads. Both share
+  fizzy's "fast" safety class, so the `abi_fingerprint` is the same for every target.
 - Every target collects `zig-out/sdk-meta.json` (written by the fizzy pin at build time). Publish
   requires all targets to agree on sdk/fingerprint, then
   [`scripts/assemble_manifest.py`](scripts/assemble_manifest.py) merges the new release into the

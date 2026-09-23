@@ -162,14 +162,20 @@ jobs:
           # vendored C (plus optional prebuilt .a/.lib deps like ghostty_vt), so there is no
           # need for macOS/Windows runners or code signing. sdk-meta.json is emitted at build
           # time — no dlopen on the runner required.
+          #
+          # Optimize mode per target: ReleaseFast on desktop, ReleaseSmall on the web, where the
+          # browser downloads and compiles the whole module before the plugin can load (pixi:
+          # 2.8 MB → 0.57 MB brotli). Both are fizzy's "fast" safety class
+          # (`sdk/src/dylib.zig` `optimize_safety_class`), so the abi_fingerprint is identical
+          # and a ReleaseSmall plugin loads in a ReleaseFast host. Never Debug/ReleaseSafe here.
           all='[
-            {"os_arch":"macos-aarch64","zig_target":"aarch64-macos","ext":"dylib"},
-            {"os_arch":"macos-x86_64","zig_target":"x86_64-macos","ext":"dylib"},
-            {"os_arch":"linux-x86_64","zig_target":"x86_64-linux-gnu","ext":"so"},
-            {"os_arch":"linux-aarch64","zig_target":"aarch64-linux-gnu","ext":"so"},
-            {"os_arch":"windows-x86_64","zig_target":"x86_64-windows","ext":"dll"},
-            {"os_arch":"windows-aarch64","zig_target":"aarch64-windows","ext":"dll"},
-            {"os_arch":"web-wasm32","zig_target":"wasm32-freestanding","ext":"wasm"}
+            {"os_arch":"macos-aarch64","zig_target":"aarch64-macos","ext":"dylib","optimize":"ReleaseFast"},
+            {"os_arch":"macos-x86_64","zig_target":"x86_64-macos","ext":"dylib","optimize":"ReleaseFast"},
+            {"os_arch":"linux-x86_64","zig_target":"x86_64-linux-gnu","ext":"so","optimize":"ReleaseFast"},
+            {"os_arch":"linux-aarch64","zig_target":"aarch64-linux-gnu","ext":"so","optimize":"ReleaseFast"},
+            {"os_arch":"windows-x86_64","zig_target":"x86_64-windows","ext":"dll","optimize":"ReleaseFast"},
+            {"os_arch":"windows-aarch64","zig_target":"aarch64-windows","ext":"dll","optimize":"ReleaseFast"},
+            {"os_arch":"web-wasm32","zig_target":"wasm32-freestanding","ext":"wasm","optimize":"ReleaseSmall"}
           ]'
           targets="${{ inputs.targets }}"
           if [ -z "$targets" ]; then
@@ -268,9 +274,9 @@ jobs:
             return 1
           }
           fetch "" || exit 1
-          fetch "-Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }}" || exit 1
+          fetch "-Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.zig_target }}" || exit 1
 
-      - name: Build (ReleaseFast, ${{ matrix.zig_target }})
+      - name: Build (${{ matrix.optimize }}, ${{ matrix.zig_target }})
         shell: bash
         run: |
           set -euo pipefail
@@ -280,7 +286,7 @@ jobs:
           log="$RUNNER_TEMP/build-${{ matrix.os_arch }}.log"
           n=0
           until [ "$n" -ge 3 ]; do
-            if zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.zig_target }} 2>&1 | tee "$log"; then
+            if zig build -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.zig_target }} 2>&1 | tee "$log"; then
               exit 0
             fi
             if ! grep -Eq 'HttpConnectionClosing|invalid HTTP response|TlsInitializationFailed|ConnectionResetByPeer|TemporaryNameServerFailure|unable to fetch|connection reset' "$log"; then
