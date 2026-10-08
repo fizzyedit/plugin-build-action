@@ -119,7 +119,36 @@ the new `fizzy_sdk_version` / `abi_fingerprint` automatically. The manifest **ac
 releases (keyed by `version` + `abi_fingerprint`), so users on older SDKs keep matching an older
 binary instead of seeing *"needs a rebuild."*
 
+## Repinning to a new SDK
+
+[`repin.yml`](.github/workflows/repin.yml) does that bump for you. Copy
+[`examples/sdk-repin.yml`](examples/sdk-repin.yml) to `.github/workflows/sdk-repin.yml` and turn
+on Settings → Actions → General → *Allow GitHub Actions to create and approve pull requests*.
+For a given SDK (default: the newest `sdk-v*` release) it:
+
+1. pins the release asset and its hash in `build.zig.zon` (`scripts/repin_zon.py`);
+2. builds the plugin against it, ReleaseFast;
+3. compares the fingerprint the build reports with the one your newest published release records.
+
+| Outcome | What it does |
+|---|---|
+| Fingerprint moved | Bumps `plugin.zig.zon` (`.version`'s patch, unless already past the newest release; `.min_sdk_version`), pushes `sdk/repin-<version>`, opens a PR. Merge it, then tag. |
+| Build fails | The same PR, as a draft, with the end of the build log: the plugin needs work first. The run fails. |
+| Fingerprint unchanged | Nothing: every installed build keeps loading. `force: true` opens the PR anyway. |
+| Already on that SDK | Nothing. |
+
+It never tags. fizzy dispatches `fizzy-sdk-release` to the `fizzyedit` plugins listed in
+`fizzyedit/plugins` when it publishes an SDK; any plugin can run the workflow by hand
+(`workflow_dispatch`) or on its own schedule.
+
 ## Changelog
+
+### v6
+
+- `repin.yml`: a second reusable workflow that moves a plugin onto a new fizzy SDK and opens a PR
+  when the plugin needs a release (see *Repinning to a new SDK*), with `scripts/repin_zon.py`
+  and `examples/sdk-repin.yml`. `build.yml` is unchanged; it still checks out its scripts at
+  `v5`, whose copies are the same.
 
 ### v4
 
@@ -226,7 +255,10 @@ that ships.
 | Path | Role |
 |------|------|
 | `.github/workflows/build.yml` | The reusable (`workflow_call`) build + publish workflow. |
+| `.github/workflows/repin.yml` | The reusable repin workflow: new SDK pin, build, PR if needed. |
+| `scripts/repin_zon.py` | Reads and rewrites the fizzy pin, bumps `plugin.zig.zon`, reads the newest release. |
 | `scripts/assemble_manifest.py` | Merges per-target sha256 fragments into `manifest.json`. |
 | `scripts/read_plugin_zon.py` | Parses identity from `plugin.zig.zon`. |
 | `scripts/read_plugin_exports.py` | Optional local helper: `dlopen` a *native* plugin and print exports. |
 | `examples/release.yml` | Drop-in caller for a plugin repo. |
+| `examples/sdk-repin.yml` | Drop-in caller for `repin.yml`. |
