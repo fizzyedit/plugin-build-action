@@ -1,0 +1,226 @@
+name: Repin Fizzy plugin
+
+# Reusable workflow: move a Fizzy plugin onto a new fizzy SDK release, and open a pull request for
+# it when the plugin needs one. Runs in the *caller's* repo context, like `build.yml`.
+#
+# A plugin binary loads only where its `abi_fingerprint` matches the host's (see `build.yml`), so
+# a new SDK whose fingerprint did not move needs no new plugin release: every installed build
+# keeps loading. This workflow pins the new SDK in `build.zig.zon`, builds against it, and
+# compares the fingerprint the build reports (`zig-out/sdk-meta.json`) with the one the plugin's
+# newest published release records (its `manifest.json`).
+#
+#   fingerprint moved   → bump `plugin.zig.zon` (.version's patch, .min_sdk_version), push
+#                         `sdk/repin-<version>`, open a PR: merge it, then tag the printed version
+#   build fails         → the same PR, as a draft, with the build's error: the plugin needs work
+#   fingerprint same    → nothing to do; say so in the run summary (`force` opens the PR anyway,
+#                         for a plugin that wants something new in `core/`)
+#   already on it       → nothing to do
+#
+# It never tags: a release stays the author's to cut. Opening the PR needs the caller repo's
+# "Allow GitHub Actions to create and approve pull requests" setting, and the caller grants
+# `contents: write` and `pull-requests: write`. A PR opened with the workflow's own token starts
+# no other workflow, so the build here is the PR's check.
+on:
+  workflow_call:
+    inputs:
+      sdk-version:
+        description: "fizzy SDK version to pin, X.Y.Z (default: the newest sdk-v* release)."
+        required: false
+        type: string
+        default: ""
+      zig-version:
+        description: "Zig toolchain version."
+        required: false
+        type: string
+        default: "0.16.0"
+      force:
+        description: "Open the repin PR even when the fingerprint did not move."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      build_env:
+        description: "As in build.yml: KEY=VALUE lines for the plugin's `zig build`."
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # As in build.yml: the scripts live in this repo, at the major version this file was written
+      # against (no context names the ref a caller pinned this workflow at).
+      - uses: actions/checkout@v4
+        with:
+          repository: fizzyedit/plugin-build-action
+          ref: v6
+          path: .plugin-build-action
+
+      - name: Which SDK
+        id: sdk
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WANT: ${{ inputs.sdk-version }}
+        run: |
+          set -euo pipefail
+          want="${WANT#sdk-v}"
+          want="${want#v}"
+          if [ -z "$want" ]; then
+            want=$(gh release list --repo fizzyedit/fizzy --limit 100 --json tagName --jq '.[].tagName' \
+              | sed -n 's/^sdk-v//p' | sort -V | tail -1)
+          fi
+          [ -n "$want" ] || { echo "::error::no sdk-v* release found on fizzyedit/fizzy"; exit 1; }
+          current=$(python3 .plugin-build-action/scripts/repin_zon.py current build.zig.zon)
+          echo "pinned: $current, wanted: $want"
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/fizzyedit/fizzy/releases/download/sdk-v$want/fizzy-sdk-v$want.tar.gz" >> "$GITHUB_OUTPUT"
+          if [ "$(printf '%s\n%s\n' "$current" "$want" | sort -V | tail -1)" = "$current" ]; then
+            echo "Already on fizzy SDK $current (asked for $want): nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "move=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "move=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: mlugg/setup-zig@v2
+        if: steps.sdk.outputs.move == 'true'
+        with:
+          version: ${{ inputs.zig-version }}
+          use-cache: false
+
+      - name: Pin the new SDK
+        if: steps.sdk.outputs.move == 'true'
+        shell: bash
+        env:
+          URL: ${{ steps.sdk.outputs.url }}
+        run: |
+          set -euo pipefail
+          hash=$(zig fetch "$URL")
+          python3 .plugin-build-action/scripts/repin_zon.py pin build.zig.zon "$URL" "$hash"
+          echo "pinned $URL as $hash"
+
+      - name: Build environment from the `build_env` secret
+        if: steps.sdk.outputs.move == 'true'
+        shell: bash
+        env:
+          BUILD_ENV: ${{ secrets.build_env }}
+        run: |
+          set -euo pipefail
+          [ -n "${BUILD_ENV:-}" ] || { echo "no build_env secret; building with none"; exit 0; }
+          while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "::warning::build_env: ignoring a line that is not KEY=VALUE" ;;
+            esac
+          done <<< "$BUILD_ENV"
+
+      # ReleaseFast, the class the published binaries and their recorded fingerprint are.
+      - name: Build against it
+        id: build
+        if: steps.sdk.outputs.move == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          zig build -Doptimize=ReleaseFast --summary all 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Does the plugin need a release
+        id: need
+        if: steps.sdk.outputs.move == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILT: ${{ steps.build.outcome }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          released="" released_fp=""
+          if gh release download --repo "$GITHUB_REPOSITORY" --pattern manifest.json -O "$RUNNER_TEMP/manifest.json" --clobber 2>/dev/null; then
+            read -r released released_fp < <(python3 .plugin-build-action/scripts/repin_zon.py released "$RUNNER_TEMP/manifest.json") || true
+          fi
+          echo "released=$released" >> "$GITHUB_OUTPUT"
+          if [ "$BUILT" != "success" ]; then
+            echo "need=true" >> "$GITHUB_OUTPUT"
+            echo "why=the build fails against it" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          fp=$(python3 -c 'import json; print(json.load(open("zig-out/sdk-meta.json"))["abi_fingerprint"])')
+          echo "fingerprint=$fp" >> "$GITHUB_OUTPUT"
+          echo "released ${released:-nothing} at ${released_fp:-no fingerprint}; built $fp"
+          if [ "$fp" != "$released_fp" ]; then
+            echo "need=true" >> "$GITHUB_OUTPUT"
+            echo "why=its fingerprint moves from ${released_fp:-no release} to $fp" >> "$GITHUB_OUTPUT"
+          elif [ "$FORCE" = "true" ]; then
+            echo "need=true" >> "$GITHUB_OUTPUT"
+            echo "why=it was asked for (the fingerprint stays $fp)" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=false" >> "$GITHUB_OUTPUT"
+            echo "Builds against fizzy SDK ${{ steps.sdk.outputs.version }} with the fingerprint release $released already has ($fp): every installed build keeps loading, so no repin is needed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Open the repin PR
+        if: steps.need.outputs.need == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK: ${{ steps.sdk.outputs.version }}
+          FROM: ${{ steps.sdk.outputs.current }}
+          RELEASED: ${{ steps.need.outputs.released }}
+          WHY: ${{ steps.need.outputs.why }}
+          BUILT: ${{ steps.build.outcome }}
+        run: |
+          set -euo pipefail
+          version=$(python3 .plugin-build-action/scripts/repin_zon.py bump plugin.zig.zon "$SDK" ${RELEASED:+"$RELEASED"})
+          branch="sdk/repin-$SDK"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add build.zig.zon plugin.zig.zon
+          git commit -m "sdk: repin to fizzy SDK $SDK" -m "From $FROM: $WHY. Releases as $version."
+          git push --force origin "$branch"
+
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "Repins the plugin from fizzy SDK \`$FROM\` to \`$SDK\`, because $WHY."
+            echo
+            echo "- \`build.zig.zon\`: the \`sdk-v$SDK\` release asset and its hash"
+            echo "- \`plugin.zig.zon\`: \`.version\` → \`$version\`, \`.min_sdk_version\` → \`$SDK\`"
+            echo
+            if [ "$BUILT" = "success" ]; then
+              echo "It builds against the new SDK (ReleaseFast, linux-x86_64). Merge it, then tag \`v$version\` to release."
+            else
+              echo "**It does not build against the new SDK yet**, so this is a draft: the plugin needs changes on this branch first. The end of the build:"
+              echo
+              echo '```'
+              tail -n 40 "$RUNNER_TEMP/build.log"
+              echo '```'
+            fi
+            echo
+            echo "Opened by \`fizzyedit/plugin-build-action\`'s repin workflow."
+          } > "$body"
+
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -qx OPEN; then
+            gh pr edit "$branch" --body-file "$body"
+            echo "Updated the open repin PR for $SDK." >> "$GITHUB_STEP_SUMMARY"
+          else
+            if [ "$BUILT" = "success" ]; then
+              gh pr create --head "$branch" --title "sdk: repin to fizzy SDK $SDK" --body-file "$body"
+            else
+              gh pr create --head "$branch" --title "sdk: repin to fizzy SDK $SDK" --body-file "$body" --draft
+            fi
+            echo "Opened a repin PR for $SDK: $WHY." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail when the build did
+        if: steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::the plugin does not build against fizzy SDK ${{ steps.sdk.outputs.version }}; see the draft repin PR"
+          exit 1
