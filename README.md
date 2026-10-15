@@ -141,7 +141,26 @@ It never tags. fizzy dispatches `fizzy-sdk-release` to the `fizzyedit` plugins l
 `fizzyedit/plugins` when it publishes an SDK; any plugin can run the workflow by hand
 (`workflow_dispatch`) or on its own schedule.
 
+## Checking pull requests
+
+[`check.yml`](.github/workflows/check.yml) is what a plugin's pull requests and pushes to `main`
+run. Copy [`examples/ci.yml`](examples/ci.yml) to `.github/workflows/ci.yml`. It runs:
+
+| Job | What it checks |
+|---|---|
+| `fmt` | `zig fmt --check` over the repo (`fmt: false` turns it off). |
+| `build <os_arch>` | The plugin cross-compiled from ubuntu-latest, Debug, for `targets` (default `linux-x86_64,macos-aarch64,windows-x86_64`), so a break on one OS shows on the PR rather than at the tag. On linux-x86_64 it also runs `zig build test` when the build declares a `test` step. |
+| `fizzy-main` | The plugin built against fizzy `main`'s `sdk/` (`zig build --fork`). Never fails the run: it warns that the next SDK release will need a change here, before `repin.yml` finds out after it. `fizzy-main: false` turns it off. |
+
+Every build sets `FIZZY_PROFILE` inside the workspace, so the install step stays there. It
+publishes nothing and needs no scripts from this repo.
+
 ## Changelog
+
+### v7
+
+- `check.yml`: a third reusable workflow, for pull requests (see *Checking pull requests*), with
+  `examples/ci.yml`. `build.yml` and `repin.yml` are unchanged.
 
 ### v6
 
@@ -256,9 +275,11 @@ that ships.
 |------|------|
 | `.github/workflows/build.yml` | The reusable (`workflow_call`) build + publish workflow. |
 | `.github/workflows/repin.yml` | The reusable repin workflow: new SDK pin, build, PR if needed. |
+| `.github/workflows/check.yml` | The reusable check workflow for pull requests: fmt, build per OS, tests, fizzy main. |
 | `scripts/repin_zon.py` | Reads and rewrites the fizzy pin, bumps `plugin.zig.zon`, reads the newest release. |
 | `scripts/assemble_manifest.py` | Merges per-target sha256 fragments into `manifest.json`. |
 | `scripts/read_plugin_zon.py` | Parses identity from `plugin.zig.zon`. |
 | `scripts/read_plugin_exports.py` | Optional local helper: `dlopen` a *native* plugin and print exports. |
 | `examples/release.yml` | Drop-in caller for a plugin repo. |
 | `examples/sdk-repin.yml` | Drop-in caller for `repin.yml`. |
+| `examples/ci.yml` | Drop-in caller for `check.yml`. |

@@ -1,0 +1,186 @@
+name: Check Fizzy plugin
+
+# Reusable workflow: the checks a Fizzy plugin's pull requests and pushes to `main` run. Runs in
+# the *caller's* repo context, like `build.yml`. Nothing is published.
+#
+#   fmt          `zig fmt --check` over the repo
+#   build        the plugin, cross-compiled from ubuntu-latest for one target per OS (as `build.yml`
+#                does for a release, so a break on one OS shows on the PR, not at the tag);
+#                `zig build test` too, on linux-x86_64, when the build declares a `test` step
+#   fizzy-main   the plugin built against fizzy `main`'s `sdk/` instead of its pinned release.
+#                Never fails the run: it is the early warning for the next SDK release, which
+#                `repin.yml` otherwise discovers only after the release is out.
+#
+# Needs no scripts from this repo, so a caller may pin it at any ref.
+on:
+  workflow_call:
+    inputs:
+      zig-version:
+        description: "Zig toolchain version."
+        required: false
+        type: string
+        default: "0.16.0"
+      targets:
+        description: "Comma-separated os_arch values to build, from build.yml's list (default: one per desktop OS)."
+        required: false
+        type: string
+        default: "linux-x86_64,macos-aarch64,windows-x86_64"
+      optimize:
+        description: "Optimize mode for the builds. Debug compiles fastest; a release still builds ReleaseFast."
+        required: false
+        type: string
+        default: "Debug"
+      fmt:
+        description: "Run `zig fmt --check`."
+        required: false
+        type: boolean
+        default: true
+      fizzy-main:
+        description: "Also build against fizzy main's sdk/ (never fails the run)."
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      build_env:
+        description: "As in build.yml: KEY=VALUE lines for the plugin's `zig build`."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    if: inputs.fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ inputs.zig-version }}
+      - name: zig fmt --check
+        run: zig fmt --check --exclude zig-pkg --exclude .zig-cache --exclude zig-out .
+
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Compute build matrix
+        id: matrix
+        shell: bash
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          # The os_arch → zig target table from build.yml.
+          all='[
+            {"os_arch":"macos-aarch64","zig_target":"aarch64-macos"},
+            {"os_arch":"macos-x86_64","zig_target":"x86_64-macos"},
+            {"os_arch":"linux-x86_64","zig_target":"x86_64-linux-gnu"},
+            {"os_arch":"linux-aarch64","zig_target":"aarch64-linux-gnu"},
+            {"os_arch":"windows-x86_64","zig_target":"x86_64-windows"},
+            {"os_arch":"windows-aarch64","zig_target":"aarch64-windows"},
+            {"os_arch":"web-wasm32","zig_target":"wasm32-freestanding"}
+          ]'
+          keep=$(printf '%s' "$TARGETS" | jq -R -c 'split(",")')
+          filtered=$(printf '%s' "$all" | jq -c --argjson keep "$keep" '[.[] | select(.os_arch as $o | $keep | index($o) != null)]')
+          if [ "$(printf '%s' "$filtered" | jq 'length')" = "0" ]; then
+            echo "::error::targets '$TARGETS' matched none of the known os_arch values"; exit 1
+          fi
+          echo "matrix=$filtered" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    name: build ${{ matrix.os_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    # As in build.yml: a plugin with no browser form loses its web download, not the release.
+    continue-on-error: ${{ matrix.os_arch == 'web-wasm32' }}
+    env:
+      # `zig build` also installs the plugin: keep that inside the workspace.
+      FIZZY_PROFILE: ${{ github.workspace }}/.profile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ inputs.zig-version }}
+          cache-key: ${{ hashFiles('**/build.zig.zon') }}
+      - name: Build environment from the `build_env` secret
+        shell: bash
+        env:
+          BUILD_ENV: ${{ secrets.build_env }}
+        run: |
+          set -euo pipefail
+          [ -n "${BUILD_ENV:-}" ] || exit 0
+          while IFS= read -r line; do
+            case "$line" in ''|'#'*) ;; *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;; esac
+          done <<< "$BUILD_ENV"
+      # Zig 0.16's HTTP client does not retry; build.yml explains.
+      - name: Fetch dependencies (with retries)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in 1 2 3 4 5; do
+            zig build --fetch -Dtarget=${{ matrix.zig_target }} && exit 0
+            echo "fetch attempt $n failed; retrying in $((n*10))s"
+            sleep $((n*10))
+          done
+          exit 1
+      - name: Build (${{ inputs.optimize }}, ${{ matrix.zig_target }})
+        run: zig build -Doptimize=${{ inputs.optimize }} -Dtarget=${{ matrix.zig_target }} --summary failures
+      - name: Test
+        if: matrix.os_arch == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if zig build -l | grep -Eq '^  test( |$)'; then
+            zig build test --summary failures
+          else
+            echo "no \`test\` step; nothing to run"
+          fi
+
+  fizzy-main:
+    if: inputs.fizzy-main
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      FIZZY_PROFILE: ${{ github.workspace }}/.profile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: fizzyedit/fizzy
+          ref: main
+          path: .fizzy
+          # In fizzy's tree `sdk/` reaches its sibling `core/` (a released tarball carries it
+          # inside; `scripts/pack-sdk.sh`).
+          sparse-checkout: |
+            sdk
+            core
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ inputs.zig-version }}
+          cache-key: ${{ hashFiles('**/build.zig.zon') }}
+      - name: Build environment from the `build_env` secret
+        shell: bash
+        env:
+          BUILD_ENV: ${{ secrets.build_env }}
+        run: |
+          set -euo pipefail
+          [ -n "${BUILD_ENV:-}" ] || exit 0
+          while IFS= read -r line; do
+            case "$line" in ''|'#'*) ;; *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;; esac
+          done <<< "$BUILD_ENV"
+      - name: Build against fizzy main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if zig build --fork="$GITHUB_WORKSPACE/.fizzy/sdk" --summary failures; then
+            echo "Builds against fizzy main ($(git -C .fizzy rev-parse --short HEAD))." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::does not build against fizzy main's sdk/; the next SDK release will need a change here"
+            exit 1
+          fi
