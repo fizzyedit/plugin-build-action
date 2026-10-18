@@ -155,11 +155,14 @@ jobs:
           repository: fizzyedit/fizzy
           ref: main
           path: .fizzy
-          # In fizzy's tree `sdk/` reaches its sibling `core/` (a released tarball carries it
-          # inside; `scripts/pack-sdk.sh`).
+          # In fizzy's tree `sdk/` reaches its sibling `core/`, and `core` the backend's glass (a
+          # released tarball carries all three inside; `scripts/pack-sdk.sh`, whose list this is).
+          sparse-checkout-cone-mode: false
           sparse-checkout: |
-            sdk
-            core
+            /sdk/
+            /core/
+            /backend/src/glass/
+            /backend/src/glass_look.zig
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ inputs.zig-version }}
