@@ -60,6 +60,10 @@ proxy. Either way the author publishes one set of assets and this workflow uploa
    },
    ```
 
+   On Zig 0.17, delete the tarball `zig fetch` leaves in the global cache before you build
+   (`rm ~/.cache/zig/p/<hash>.tar.gz`): the build unpacks it with its top folder kept, and
+   reports a hash mismatch. The build fetches the package itself when it isn't there.
+
    That pin is the source of truth for `fizzy_sdk_version` and the ReleaseFast
    `abi_fingerprint` — the action reads both from the built dylib. You never copy them into
    workflow YAML. See fizzy's

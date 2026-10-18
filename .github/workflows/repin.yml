@@ -102,6 +102,9 @@ jobs:
         run: |
           set -euo pipefail
           hash=$(zig fetch "$URL")
+          # Zig 0.17: a build unpacks a tarball `zig fetch` left in the global cache with its top
+          # folder kept, so its hash would disagree with this one. Let the build fetch it itself.
+          rm -f "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/p/$hash.tar.gz"
           python3 .plugin-build-action/scripts/repin_zon.py pin build.zig.zon "$URL" "$hash"
           echo "pinned $URL as $hash"
 
