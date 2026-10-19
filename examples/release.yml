@@ -26,8 +26,12 @@ on:
 
 jobs:
   build:
-    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v4
+    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v8
     permissions:
       contents: write
     with:
       zig-version: "0.16.0"
+    # Optional: refresh the store as soon as the release is published (README, "Secrets").
+    # Unset, it is empty and the store lists the release at its next scheduled refresh.
+    secrets:
+      store_dispatch_token: ${{ secrets.STORE_DISPATCH_TOKEN }}

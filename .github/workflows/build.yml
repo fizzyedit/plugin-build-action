@@ -48,8 +48,9 @@ on:
         required: false
       store_dispatch_token:
         description: >-
-          Token that may run workflows in `fizzyedit/plugins` (a fine-grained PAT or GitHub App
-          installation token with `actions: write` on that repo). When given, a successful release
+          Token that may run workflows in `fizzyedit/plugins`: a fine-grained PAT with
+          `actions: write` on that repo (not an App installation token, which expires within the
+          hour). When given, a successful release
           starts the store's `aggregate.yml`, so the plugin is listed within minutes rather than at
           the next 6-hourly refresh. Omit it and the release is unchanged; the store picks it up on
           its schedule.
@@ -515,9 +516,10 @@ jobs:
             dist/*.wasm
             dist/manifest.json
 
-  # The release is already published; asking the store to re-aggregate is best-effort, so a bad
-  # token warns instead of failing a release that succeeded. aggregate.yml serialises runs in its
-  # `pages` concurrency group, so several plugins releasing at once queue rather than race.
+  # The release is already published before this runs, so a failure here undoes nothing: it fails
+  # this job alone, so an expired or revoked token shows red rather than the store quietly going
+  # back to its schedule. aggregate.yml keeps one run waiting in its `pages` concurrency group,
+  # starting from main's head, so several plugins releasing at once are all taken in.
   refresh-store:
     needs: publish
     runs-on: ubuntu-latest
@@ -534,5 +536,6 @@ jobs:
           if gh workflow run aggregate.yml --repo fizzyedit/plugins --ref main; then
             echo "started fizzyedit/plugins aggregate.yml"
           else
-            echo "::warning::could not start fizzyedit/plugins aggregate.yml; the store lists this release at its next scheduled refresh"
+            echo "::error::could not start fizzyedit/plugins aggregate.yml (is store_dispatch_token expired or revoked?); the release is published, and the store lists it at its next scheduled refresh"
+            exit 1
           fi

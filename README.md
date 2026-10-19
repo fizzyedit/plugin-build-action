@@ -115,8 +115,9 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 The workflow builds all targets, publishes the release with the binaries + `manifest.json`, and
-the next `fizzyedit/plugins` aggregation (on merge, its 6-hourly cron, a manual run, or — when you
-pass `store_dispatch_token` — the end of your release) pulls your plugin into the catalog. Subsequent releases need no registry PR — just tag again.
+the next `fizzyedit/plugins` aggregation pulls your plugin into the catalog: on merge, its
+6-hourly cron, a manual run, or the end of your release when you pass `store_dispatch_token`.
+Subsequent releases need no registry PR — just tag again.
 
 Bump the fizzy pin in `build.zig.zon` when you want a new SDK; the next tag's manifest picks up
 the new `fizzy_sdk_version` / `abi_fingerprint` automatically. The manifest **accumulates**
@@ -165,6 +166,8 @@ publishes nothing and needs no scripts from this repo.
 
 - `build.yml`: optional secret `store_dispatch_token`; a successful release then starts the
   store's `aggregate.yml` so the plugin is listed within minutes. Without it, nothing changes.
+  A token the store rejects fails that last job (the release is already published).
+- `examples/release.yml` pins `@v8` and passes `STORE_DISPATCH_TOKEN`.
 
 ### v7
 
@@ -238,12 +241,12 @@ Initial release.
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `build_env` | no | Environment for every `zig build` in the workflow, as `KEY=VALUE` lines. For a plugin whose build bakes in an app credential it cannot commit. |
-| `store_dispatch_token` | no | Token with `actions: write` on `fizzyedit/plugins`. When set, a successful release refreshes the store immediately instead of at its next 6-hourly run. |
+| `store_dispatch_token` | no | (v8 and later) A fine-grained PAT with `actions: write` on `fizzyedit/plugins`. When set, a successful release refreshes the store immediately instead of at its next 6-hourly run. |
 
 ```yaml
 jobs:
   build:
-    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v5
+    uses: fizzyedit/plugin-build-action/.github/workflows/build.yml@v8
     permissions:
       contents: write
     with:
@@ -259,11 +262,17 @@ because a build script that generates a file from these variables usually skips 
 the file is already there, and an empty one written during the fetch would otherwise be the one
 that ships.
 
-`store_dispatch_token` is a fine-grained PAT (or GitHub App installation token) with
-`actions: write` on `fizzyedit/plugins`. After the release is published, a final job runs
+`store_dispatch_token` is a fine-grained PAT with `actions: write` on `fizzyedit/plugins`, kept
+once as an organization secret (`STORE_DISPATCH_TOKEN`) rather than copied into each plugin repo.
+A stored GitHub App installation token will not do: it expires within the hour. Only `@v8` and
+later declare the secret; passing it to an older tag fails the release workflow before it starts.
+After the release is published, a final job runs
 `gh workflow run aggregate.yml --repo fizzyedit/plugins`. Without the secret the job only prints a
-notice, so plugins outside the org release as before. A rejected token is a warning, never a
-failed release. The store serialises its runs, so several simultaneous releases queue.
+notice, so plugins outside the org release as before. A rejected token (expired, revoked) fails
+that job, red beside a release that is already published, so the token is renewed rather than the
+store quietly going back to its schedule. The store keeps one run waiting behind the one running;
+it starts from `main`'s head, so several releases at once are all taken in, and the earlier
+waiting runs show as cancelled.
 
 ## How it works
 
