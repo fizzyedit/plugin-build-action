@@ -46,6 +46,14 @@ on:
           workflow. Omit it and the build runs with nothing extra, which for drive means a
           binary that compiles and then declines to sign in.
         required: false
+      store_dispatch_token:
+        description: >-
+          Token that may run workflows in `fizzyedit/plugins` (a fine-grained PAT or GitHub App
+          installation token with `actions: write` on that repo). When given, a successful release
+          starts the store's `aggregate.yml`, so the plugin is listed within minutes rather than at
+          the next 6-hourly refresh. Omit it and the release is unchanged; the store picks it up on
+          its schedule.
+        required: false
 
 permissions:
   contents: write
@@ -506,3 +514,25 @@ jobs:
             dist/*.dll
             dist/*.wasm
             dist/manifest.json
+
+  # The release is already published; asking the store to re-aggregate is best-effort, so a bad
+  # token warns instead of failing a release that succeeded. aggregate.yml serialises runs in its
+  # `pages` concurrency group, so several plugins releasing at once queue rather than race.
+  refresh-store:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Ask the store to aggregate now
+        env:
+          GH_TOKEN: ${{ secrets.store_dispatch_token }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::no store_dispatch_token given; the store lists this release at its next scheduled refresh"
+            exit 0
+          fi
+          if gh workflow run aggregate.yml --repo fizzyedit/plugins --ref main; then
+            echo "started fizzyedit/plugins aggregate.yml"
+          else
+            echo "::warning::could not start fizzyedit/plugins aggregate.yml; the store lists this release at its next scheduled refresh"
+          fi
